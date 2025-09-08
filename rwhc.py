@@ -1,126 +1,100 @@
-# rwhc.py
 import numpy as np
 from scipy.sparse import issparse
 from randomwalk import HypergraphRandomWalk
 
-
 class RWHCCalculator:
-    """Random Walk Heat Centrality (RWHC) Calculator"""
-
     def __init__(self, incidence_matrix):
-        """
-        Initialize RWHC calculator
-
-        Parameters:
-        incidence_matrix: Hypergraph incidence matrix, shape [num_nodes, num_edges]
-        """
         self.incidence_matrix = incidence_matrix
         self.n_nodes, self.n_edges = incidence_matrix.shape
-        self.node_degrees = np.sum(incidence_matrix, axis=1)  # Node hyperdegrees
+        if self.n_edges == 0:
+            raise ValueError("No hyperedges in incidence matrix")
+        self.node_degrees = np.sum(incidence_matrix, axis=1)
         if issparse(incidence_matrix):
             self.node_degrees = self.node_degrees.A1 if hasattr(self.node_degrees, 'A1') else self.node_degrees.ravel()
-        self.edge_degrees = np.sum(incidence_matrix, axis=0)  # Hyperedge degrees
+        self.edge_degrees = np.sum(incidence_matrix, axis=0)
         if issparse(incidence_matrix):
             self.edge_degrees = self.edge_degrees.A1 if hasattr(self.edge_degrees, 'A1') else self.edge_degrees.ravel()
         self.rw = HypergraphRandomWalk(incidence_matrix)
         self.transition_matrix = self.rw.transition_matrix
 
     def calculate_edge_mass(self):
-        """Calculate hyperedge mass: m(e) = sqrt(|e|² + (average node degree)²)"""
+        """计算超边质量"""
         avg_node_degree = np.mean(self.node_degrees)
         edge_mass = np.sqrt(self.edge_degrees ** 2 + avg_node_degree ** 2)
         return edge_mass
 
     def calculate_edge_distance(self):
-        """
-        Calculate effective distance between hyperedges:
-        d(e_i,e_j) = 1 - log2( (|e_i∩e_j|/|e_i∪e_j|) * (|e_i∩e_j|/|e_i|) )
-        """
+        """计算Jaccard距离"""
         edge_distance = np.ones((self.n_edges, self.n_edges)) * np.inf
-
         for i in range(self.n_edges):
             for j in range(self.n_edges):
                 if i == j:
                     edge_distance[i, j] = 0
                     continue
-
-                # Get nodes in hyperedges i and j
                 if issparse(self.incidence_matrix):
                     nodes_i = self.incidence_matrix[:, i].nonzero()[0]
                     nodes_j = self.incidence_matrix[:, j].nonzero()[0]
                 else:
                     nodes_i = np.where(self.incidence_matrix[:, i])[0]
                     nodes_j = np.where(self.incidence_matrix[:, j])[0]
-
-                # Calculate intersection and union sizes
                 intersection = len(set(nodes_i) & set(nodes_j))
                 union = len(set(nodes_i) | set(nodes_j))
-
-                if intersection > 0:
-                    # Avoid log2(0)
-                    ratio = (intersection / union) * (intersection / len(nodes_i))
-                    edge_distance[i, j] = 1 - np.log2(ratio + 1e-10)
-
+                if union > 0:
+                    edge_distance[i, j] = 1 - intersection / union
         return edge_distance
 
-    def calculate_edge_force(self, edge_mass, edge_distance):
-        """
-        Calculate interaction force between hyperedges based on gravity model:
-        g(e_i,e_j) = m(e_i)*m(e_j) / d(e_i,e_j)²
-        """
+    def calculate_edge_force(self, edge_mass, edge_distance, lambda_val=5e-3, theta=1.25):
+        """基于重力模型的超边作用力，整合lambda和theta"""
         edge_force = np.zeros((self.n_edges, self.n_edges))
-
         for i in range(self.n_edges):
             for j in range(self.n_edges):
-                if edge_distance[i, j] > 0:
-                    edge_force[i, j] = (edge_mass[i] * edge_mass[j]) / (edge_distance[i, j] ** 2)
-
+                if edge_distance[i, j] > 0 and edge_distance[i, j] < np.inf:
+                    edge_force[i, j] = lambda_val * (edge_mass[i] * edge_mass[j]) / (edge_distance[i, j] ** theta + 1e-10)
         return edge_force
 
+    def build_laplacian_matrix(self):
+        pi = self.rw.calculate_stationary_distribution(alpha=0.85)
+        phi = np.diag(pi)
+        laplacian = phi - 0.5 * (phi @ self.transition_matrix + self.transition_matrix.T @ phi)
+        return laplacian
+
     def initialize_heat(self, lambda_val=5e-3, theta=1.25):
-        """
-        Initialize node heat values:
-        1. Calculate hyperedge importance = sum(inter-hyperedge forces)
-        2. Distribute to nodes based on hyperdegree proportion
-        """
+        """初始化热力值，不移除幅度信息"""
         heat = np.zeros(self.n_nodes)
         edge_mass = self.calculate_edge_mass()
         edge_distance = self.calculate_edge_distance()
-        edge_force = self.calculate_edge_force(edge_mass, edge_distance)
-
-        # Calculate hyperedge importance
+        edge_force = self.calculate_edge_force(edge_mass, edge_distance, lambda_val, theta)
         edge_importance = np.sum(edge_force, axis=1)
 
-        # Distribute hyperedge importance to nodes
         for e in range(self.n_edges):
             if issparse(self.incidence_matrix):
                 nodes_e = self.incidence_matrix[:, e].nonzero()[0]
             else:
                 nodes_e = np.where(self.incidence_matrix[:, e])[0]
             if len(nodes_e) > 0:
-                # Distribute based on hyperdegree proportion
-                weights = self.node_degrees[nodes_e] / np.sum(self.node_degrees[nodes_e])
+                weights = self.node_degrees[nodes_e] / (np.sum(self.node_degrees[nodes_e]) + 1e-10)
                 for u_idx, u in enumerate(nodes_e):
                     heat[u] += edge_importance[e] * weights[u_idx]
 
-        # Normalize
-        if np.sum(heat) > 0:
-            heat = heat / np.sum(heat)
+        # 移除归一化，保持原始幅度
+        # if np.sum(heat) > 0:
+        #     heat = heat / np.sum(heat)
 
         return heat
 
-    def build_laplacian_matrix(self):
-        pi = self.rw.calculate_stationary_distribution()
-        phi = np.diag(pi)
-        laplacian = phi - 0.5 * (phi @ self.transition_matrix + self.transition_matrix.T @ phi)
-        return laplacian
-
-    def calculate_rwhc(self, max_iter=1000, tol=1e-6, lambda_val=5e-3, theta=1.25):
+    def calculate_rwhc(self, max_iter=1000, tol=1e-6, lambda_val=5e-3, theta=1.25, alpha=0.7):
+        """计算RWHC，保持数值幅度"""
         heat = self.initialize_heat(lambda_val, theta)
         laplacian = self.build_laplacian_matrix()
+        initial_heat = heat.copy()
 
         for _ in range(max_iter):
-            heat_new = heat - laplacian @ heat
+            heat_new = alpha * (heat - laplacian @ heat) + (1 - alpha) * initial_heat
+
+            # 移除迭代中的归一化
+            # if np.sum(heat_new) > 0:
+            #     heat_new /= np.sum(heat_new)
+
             if np.linalg.norm(heat_new - heat) < tol:
                 break
             heat = heat_new

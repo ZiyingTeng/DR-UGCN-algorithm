@@ -1,38 +1,79 @@
+# import numpy as np
+# from scipy.sparse import csr_matrix
+# from scipy.sparse.linalg import eigsh
+# import networkx as nx
+# from connectivity import hypergraph_natural_connectivity
+#
+# def compute_dc(incidence_matrix):
+#     adj = incidence_matrix.dot(incidence_matrix.T)
+#     adj.setdiag(0)
+#     G = nx.from_scipy_sparse_array(adj)
+#     dc = nx.degree_centrality(G)
+#     return np.array([dc[i] for i in range(len(dc))])
+#
+# def compute_bc(incidence_matrix):
+#     adj = incidence_matrix.dot(incidence_matrix.T)
+#     adj.setdiag(0)
+#     G = nx.from_scipy_sparse_array(adj)
+#     bc = nx.betweenness_centrality(G)
+#     return np.array([bc[i] for i in range(len(bc))])
+#
+# def compute_hdc(incidence_matrix):
+#     return np.sum(incidence_matrix, axis=1).A1
+#
+# def compute_sc(incidence_matrix):
+#     rho = hypergraph_natural_connectivity(incidence_matrix)
+#     # Approximate SC as normalized eigenvector of largest eigenvalue
+#     H = csr_matrix(incidence_matrix)
+#     A = H.dot(H.T)
+#     A.setdiag(0)
+#     _, eigenvectors = eigsh(A, k=1, which='LM')
+#     sc = np.abs(eigenvectors[:, 0])
+#     sc = sc / np.sum(sc)
+#     return sc
+
+
 import numpy as np
 from scipy.sparse import csr_matrix
-import networkx as nx
 from scipy.sparse.linalg import eigsh
-
+import networkx as nx
 from connectivity import hypergraph_natural_connectivity
 
 def compute_dc(incidence_matrix):
-    """Compute Degree Centrality (DC) on projected graph."""
+    """度中心性"""
+    num_nodes = incidence_matrix.shape[0]
     adj = incidence_matrix.dot(incidence_matrix.T)
     adj.setdiag(0)
     G = nx.from_scipy_sparse_array(adj)
     dc = nx.degree_centrality(G)
-    return np.array([dc[i] for i in range(len(dc))])
+    dc_array = np.zeros(num_nodes)
+    for i in range(num_nodes):
+        dc_array[i] = dc.get(i, 0)
+    return dc_array
 
 def compute_bc(incidence_matrix):
-    """Compute Betweenness Centrality (BC) on projected graph."""
+    num_nodes = incidence_matrix.shape[0]
     adj = incidence_matrix.dot(incidence_matrix.T)
     adj.setdiag(0)
     G = nx.from_scipy_sparse_array(adj)
     bc = nx.betweenness_centrality(G)
-    return np.array([bc[i] for i in range(len(bc))])
+    bc_array = np.zeros(num_nodes)
+    for i in range(num_nodes):
+        bc_array[i] = bc.get(i, 0)
+    return bc_array
 
 def compute_hdc(incidence_matrix):
-    """Compute Hyperdegree Centrality (HDC)."""
     return np.sum(incidence_matrix, axis=1).A1
 
 def compute_sc(incidence_matrix):
-    """Compute Spectral Centrality (SC) based on natural connectivity."""
+    num_nodes = incidence_matrix.shape[0]
     rho = hypergraph_natural_connectivity(incidence_matrix)
-    # Approximate SC as normalized eigenvector of largest eigenvalue
     H = csr_matrix(incidence_matrix)
     A = H.dot(H.T)
     A.setdiag(0)
     _, eigenvectors = eigsh(A, k=1, which='LM')
     sc = np.abs(eigenvectors[:, 0])
-    sc = sc / np.sum(sc)
+    if len(sc) != num_nodes:
+        raise ValueError(f"SC length {len(sc)} != num_nodes {num_nodes}")
+    sc = sc / (np.sum(sc) + 1e-10)
     return sc
