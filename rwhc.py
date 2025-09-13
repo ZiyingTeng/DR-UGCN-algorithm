@@ -2,6 +2,21 @@ import numpy as np
 from scipy.sparse import issparse
 from randomwalk import HypergraphRandomWalk
 
+
+def calculate_rwhc_with_decay(self, distance_decay=1.25, max_iter=1000, tol=1e-6, lambda_val=5e-3, alpha=0.7):
+    """计算RWHC，支持动态的distance_decay参数"""
+    heat = self.initialize_heat(lambda_val, distance_decay)
+    laplacian = self.build_laplacian_matrix()
+    initial_heat = heat.copy()
+
+    for _ in range(max_iter):
+        heat_new = alpha * (heat - laplacian @ heat) + (1 - alpha) * initial_heat
+        if np.linalg.norm(heat_new - heat) < tol:
+            break
+        heat = heat_new
+
+    return heat
+
 class RWHCCalculator:
     def __init__(self, incidence_matrix):
         self.incidence_matrix = incidence_matrix
@@ -58,12 +73,12 @@ class RWHCCalculator:
         laplacian = phi - 0.5 * (phi @ self.transition_matrix + self.transition_matrix.T @ phi)
         return laplacian
 
-    def initialize_heat(self, lambda_val=5e-3, theta=1.25):
-        """初始化热力值，不移除幅度信息"""
+    def initialize_heat(self, lambda_val=5e-3, distance_decay=1.25):
+        """初始化热力值，支持distance_decay参数"""
         heat = np.zeros(self.n_nodes)
         edge_mass = self.calculate_edge_mass()
         edge_distance = self.calculate_edge_distance()
-        edge_force = self.calculate_edge_force(edge_mass, edge_distance, lambda_val, theta)
+        edge_force = self.calculate_edge_force(edge_mass, edge_distance, lambda_val, distance_decay)
         edge_importance = np.sum(edge_force, axis=1)
 
         for e in range(self.n_edges):
@@ -76,11 +91,31 @@ class RWHCCalculator:
                 for u_idx, u in enumerate(nodes_e):
                     heat[u] += edge_importance[e] * weights[u_idx]
 
-        # 移除归一化，保持原始幅度
-        # if np.sum(heat) > 0:
-        #     heat = heat / np.sum(heat)
-
         return heat
+
+    # def initialize_heat(self, lambda_val=5e-3, theta=1.25):
+    #     """初始化热力值，不移除幅度信息"""
+    #     heat = np.zeros(self.n_nodes)
+    #     edge_mass = self.calculate_edge_mass()
+    #     edge_distance = self.calculate_edge_distance()
+    #     edge_force = self.calculate_edge_force(edge_mass, edge_distance, lambda_val, theta)
+    #     edge_importance = np.sum(edge_force, axis=1)
+    #
+    #     for e in range(self.n_edges):
+    #         if issparse(self.incidence_matrix):
+    #             nodes_e = self.incidence_matrix[:, e].nonzero()[0]
+    #         else:
+    #             nodes_e = np.where(self.incidence_matrix[:, e])[0]
+    #         if len(nodes_e) > 0:
+    #             weights = self.node_degrees[nodes_e] / (np.sum(self.node_degrees[nodes_e]) + 1e-10)
+    #             for u_idx, u in enumerate(nodes_e):
+    #                 heat[u] += edge_importance[e] * weights[u_idx]
+    #
+    #     # 移除归一化，保持原始幅度
+    #     # if np.sum(heat) > 0:
+    #     #     heat = heat / np.sum(heat)
+    #
+    #     return heat
 
     def calculate_rwhc(self, max_iter=1000, tol=1e-6, lambda_val=5e-3, theta=1.25, alpha=0.7):
         """计算RWHC，保持数值幅度"""

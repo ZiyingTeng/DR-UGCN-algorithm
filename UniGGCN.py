@@ -26,7 +26,7 @@ class UniGCNRegression(nn.Module):
         self.norms = nn.ModuleList()
 
         # 第一层
-        self.gcn_layers.append(GCNConv(in_channels + hidden_channels, hidden_channels))
+        self.gcn_layers.append(GCNConv(6, hidden_channels))
         self.norms.append(nn.LayerNorm(hidden_channels))
 
         # 中间层
@@ -62,20 +62,26 @@ class UniGCNRegression(nn.Module):
             norm.reset_parameters()
 
     def forward(self, data):
-        x_orig = data.x
-
-        # UniG编码
-        x_unig = self.unig_encoder(data)
-
-        # 拼接原始特征和UniG特征
-        x = torch.cat([x_orig, x_unig], dim=-1)
-
-        # GCN层
+        x = data.x  # 直接使用原始特征
         for i, (conv, norm) in enumerate(zip(self.gcn_layers, self.norms)):
             x = conv(x, data.edge_index)
             x = norm(x)
             if i < len(self.gcn_layers) - 1:
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
-
         return self.regressor(x)
+        # x_orig = data.x
+        # # UniG编码
+        # x_unig = self.unig_encoder(data)
+        # # 拼接原始特征和UniG特征
+        # x = torch.cat([x_orig, x_unig], dim=-1)
+        #
+        # # GCN层
+        # for i, (conv, norm) in enumerate(zip(self.gcn_layers, self.norms)):
+        #     x = conv(x, data.edge_index)
+        #     x = norm(x)
+        #     if i < len(self.gcn_layers) - 1:
+        #         x = F.relu(x)
+        #         x = F.dropout(x, p=self.dropout, training=self.training)
+        #
+        # return self.regressor(x)

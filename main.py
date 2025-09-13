@@ -5,18 +5,18 @@ import torch
 import torch.nn as nn
 from torch_geometric.data import Data
 from UniGGCN import UniGCNRegression
-from new_aware_model import NuAwareUniGCN
+from new_aware_model import NuAwareUniGCN, NuAwareUniGCNWithFiLM, EnhancedNuAwareModel
 from rwhc import RWHCCalculator
 from rwiec import RWIECalculator
 from utils import load_hypergraph, compute_features, split_dataset, compute_infected_fraction, cache_baseline_scores, \
-    load_hypergraph_pickle, prepare_multi_nu_training_data, create_nu_specific_labels, \
-    create_multi_nu_simulation_labels, create_high_quality_multi_nu_labels
+    load_hypergraph_pickle,prepare_enhanced_training_data
 from baseline import compute_hdc, compute_dc, compute_bc, compute_sc
 import matplotlib.pyplot as plt
 import pickle
 import os
 import random
 from unigencoder import Unigencoder
+import torch.nn.functional as F
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -25,6 +25,155 @@ def set_seed(seed=42):
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
+
+
+def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, lr=0.001, patience=50):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+
+    # 准备节点度特征
+    node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
+
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=15, factor=0.5)
+
+    best_loss = float('inf')
+    patience_counter = 0
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        total_main_loss = 0
+        total_aux_loss = 0
+
+        # 随机打乱训练样本
+        indices = torch.randperm(len(data.seed_sets))
+
+        for idx in indices:
+            seed_set = data.seed_sets[idx]
+            nu_val = data.seed_set_nu[idx]
+            true_score = data.seed_set_labels[idx]
+
+            optimizer.zero_grad()
+
+            # 前向传播
+            main_scores, linear_scores = model(data, nu_val, node_degrees)
+
+            # 计算主损失：种子集总分 vs 真实分数
+            seed_set_scores = main_scores[seed_set]
+            predicted_score = torch.sum(seed_set_scores)
+            loss_main = F.mse_loss(predicted_score, true_score)
+
+            # 计算辅助损失：鼓励主分数与线性分数分布相似
+            loss_aux = F.mse_loss(main_scores, linear_scores.detach())
+
+            # 组合损失
+            alpha = 0.1  # 辅助损失权重
+            loss = loss_main + alpha * loss_aux
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+
+            total_loss += loss.item()
+            total_main_loss += loss_main.item()
+            total_aux_loss += loss_aux.item()
+
+        # 验证和早停逻辑
+        avg_loss = total_loss / len(indices)
+        avg_main_loss = total_main_loss / len(indices)
+        avg_aux_loss = total_aux_loss / len(indices)
+
+        if epoch % 20 == 0:
+            print(
+                f'Epoch {epoch:3d} | Loss: {avg_loss:.4f} (Main: {avg_main_loss:.4f}, Aux: {avg_aux_loss:.4f}) | LR: {optimizer.param_groups[0]["lr"]:.6f}')
+
+        # 早停逻辑
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            patience_counter = 0
+            torch.save(model.state_dict(), 'best_enhanced_model.pth')
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping at epoch {epoch}")
+                break
+
+        scheduler.step(avg_loss)
+
+    # 加载最佳模型
+    model.load_state_dict(torch.load('best_enhanced_model.pth', map_location=device))
+    return model
+
+
+def analyze_auxiliary_weights(model, data, nu_values, incidence_matrix):
+    """分析辅助网络学到的特征权重"""
+    device = next(model.parameters()).device
+    node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
+
+    print("辅助网络学到的特征权重随nu的变化:")
+    feature_names = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap']
+
+    for nu in nu_values:
+        with torch.no_grad():
+            # 修改这里：模型返回元组，第三个元素是辅助权重
+            _, _, aux_weights = model(data, nu, node_degrees, return_auxiliary=True)
+
+        weights = aux_weights.squeeze().cpu().numpy()
+        print(f"ν = {nu:.1f}: {', '.join([f'{name}:{w:.3f}' for name, w in zip(feature_names, weights)])}")
+
+
+def train_with_seed_sets(model, data, epochs=200, lr=0.001, patience=30, focus_nu_range=(1.3, 1.8)):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=10, factor=0.5)
+    mse_loss = nn.MSELoss()
+    ranking_loss = nn.MarginRankingLoss(margin=0.1)
+    best_loss = float('inf')
+    patience_counter = 0
+
+    for epoch in range(epochs):
+        model.train()
+        total_loss = 0
+        indices = torch.randperm(len(data.seed_sets))
+        for idx in indices:
+            seed_set = data.seed_sets[idx]
+            nu_val = data.seed_set_nu[idx].item()
+            true_label = data.seed_set_labels[idx]
+            if focus_nu_range and not (focus_nu_range[0] <= nu_val <= focus_nu_range[1]):
+                if np.random.rand() < 0.7:
+                    continue
+            optimizer.zero_grad()
+            node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
+            node_scores = model(data, nu_val, node_degrees)
+            seed_set_scores = node_scores[seed_set]
+            predicted_score = torch.sum(seed_set_scores)
+            loss_mse = mse_loss(predicted_score, true_label)
+            if idx > 0:
+                other_idx = idx - 1
+                other_score = torch.sum(node_scores[data.seed_sets[other_idx]])
+                other_label = data.seed_set_labels[other_idx]
+                loss_rank = ranking_loss(predicted_score, other_score, torch.tensor(1.0 if true_label > other_label else -1.0))
+                weight_rank = 0.4 + 0.2 * (nu_val - 1.0)
+                loss = (1 - weight_rank) * loss_mse + weight_rank * loss_rank
+            else:
+                loss = loss_mse
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            optimizer.step()
+            total_loss += loss.item()
+            print(f"Epoch {epoch + 1}, Loss: {total_loss / len(indices):.4f}")
+        val_loss = 0  # Add validation logic if needed
+        scheduler.step(val_loss)
+        if val_loss < best_loss:
+            best_loss = val_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
+        if patience_counter >= patience:
+            break
+    return model
 
 
 def focused_nu_training(model, data, nu_values, Y_real, focus_nu=1.4, epochs=200, lr=0.001):
@@ -215,117 +364,48 @@ def prepare_training_data(incidence_matrix, features, edge_index, top_k, lambda_
     return torch.tensor(y, dtype=torch.float).reshape(-1, 1)
 
 
+def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, top_k_base=0.05, num_runs=100):
+    results = {}
+    for nu in nu_vals:
+        top_k_ratio = max(0.02, top_k_base - 0.03 * (nu - 1.0))
+        top_k = int(incidence_matrix.shape[0] * top_k_ratio)
+        model.eval()
+        with torch.no_grad():
+            node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1,
+                                                                                                                     1)
 
+            # 修改这里：模型返回元组 (main_scores, linear_scores)，我们只需要 main_scores
+            main_scores, linear_scores = model(data, nu, node_degrees)
+            node_scores = main_scores.cpu().numpy().flatten()  # 只取主分数
 
+        top_nodes = np.argsort(node_scores)[-top_k:]
+        infected_frac = compute_infected_fraction(incidence_matrix, top_nodes, lambda_val, nu, mu=1.0,
+                                                  num_runs=num_runs)
+        results[nu] = {'Enhanced-NuGNN': infected_frac}
 
-# def evaluate_algorithms(incidence_matrix, features, edge_index, top_k, lambda_vals, nu_vals):
-#     set_seed(42)
-#     num_nodes = incidence_matrix.shape[0]
-#     print(f"Number of nodes: {num_nodes}, Top k: {top_k}")
-#
-#     # 分析特征权重分布
-#     print("\n=== Feature Weight Analysis ===")
-#     for nu in [1.0, 1.3, 1.6, 2.0]:
-#         weights = get_feature_weights(nu)
-#         print(f"nu={nu:.1f}: {weights}")
-#
-#     lambda_val = lambda_vals[0]
-#     y = prepare_training_data(incidence_matrix, features, edge_index, top_k, lambda_val, nu_vals)
-#
-#     data = Data(
-#         x=features,
-#         edge_index=edge_index,
-#         y=y,
-#         num_nodes=features.shape[0]  # 确保有 num_nodes 属性
-#     )
-#
-#     model = UniGCNRegression(
-#         in_channels=features.shape[1],
-#         hidden_channels=128,
-#         out_channels=1,
-#         num_layers=3,
-#         dropout=0.3
-#     )
-#
-#     data = model.unig_encoder.d_expansion(data)
-#
-#     train_idx, val_idx, test_idx = split_dataset(num_nodes)
-#
-#     print("Training DR-UGCN model...")
-#     model, train_losses, val_losses = train_model(model, data, train_idx, val_idx, epochs=200, lr=0.0001, patience=20)
-#     model.eval()
-#     cache_file = "dr_ugcn_scores.pkl"
-#
-#     with torch.no_grad():
-#         scores_dr_ugcn = model(data).squeeze().cpu().numpy()
-#         scores_dr_ugcn = np.clip(scores_dr_ugcn, 0, 1)
-#
-#     with open(cache_file, 'wb') as f:
-#         pickle.dump(scores_dr_ugcn, f)
-#
-#     scores_dc, scores_bc, scores_hdc, scores_sc = cache_baseline_scores(incidence_matrix)
-#
-#     results = {alg: [] for alg in ['DR-UGCN', 'DC', 'BC', 'HDC', 'SC']}
-#
-#     for nu in nu_vals:
-#         print(f"\nEvaluating at nu={nu:.1f}")
-#         for alg, scores in [
-#             ('DR-UGCN', scores_dr_ugcn),
-#             ('DC', scores_dc),
-#             ('BC', scores_bc),
-#             ('HDC', scores_hdc),
-#             ('SC', scores_sc)
-#         ]:
-#             current_top_k = min(top_k, len(scores))
-#             top_nodes = np.argsort(scores)[-current_top_k:]
-#
-#             infected_frac = compute_infected_fraction(
-#                 incidence_matrix, top_nodes, lambda_vals[0], nu,
-#                 mu=1.0, num_runs=10
-#             )
-#             results[alg].append(infected_frac)
-#             print(f"  {alg}: infected_frac={infected_frac:.4f}")
-#
-#     return results, train_losses, val_losses
+        try:
+            baseline_scores = cache_baseline_scores(incidence_matrix)
+            for method in ['DC', 'BC', 'HDC', 'SC']:
+                scores = baseline_scores[method]
+                top_nodes = np.argsort(scores)[-top_k:]
+                infected_frac = compute_infected_fraction(incidence_matrix, top_nodes, lambda_val, nu, mu=1.0,
+                                                          num_runs=num_runs)
+                results[nu][method] = infected_frac
+        except KeyError as e:
+            print(f"KeyError in baseline scores: {e}. Forcing recalculation...")
+            os.remove("baseline_scores.pkl")
+            baseline_scores = cache_baseline_scores(incidence_matrix)
+            for method in ['DC', 'BC', 'HDC', 'SC']:
+                scores = baseline_scores[method]
+                top_nodes = np.argsort(scores)[-top_k:]
+                infected_frac = compute_infected_fraction(incidence_matrix, top_nodes, lambda_val, nu, mu=1.0,
+                                                          num_runs=num_runs)
+                results[nu][method] = infected_frac
 
-
-def evaluate_enhanced_model(model, incidence_matrix, data, nu_values, lambda_val, top_k):
-    """评估改进的Nu-Aware模型"""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    data = data.to(device)
-
-    scores_dc, scores_bc, scores_hdc, scores_sc = cache_baseline_scores(incidence_matrix)
-
-    results = {alg: [] for alg in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']}
-
-    model.eval()
-    with torch.no_grad():
-        for nu in nu_values:
-            print(f"Evaluating at nu={nu:.1f}")
-
-            scores_enhanced = model(data, nu).squeeze().cpu().numpy()
-
-            algorithm_scores = [
-                ('Enhanced-NuGNN', scores_enhanced),
-                ('DC', scores_dc),
-                ('BC', scores_bc),
-                ('HDC', scores_hdc),
-                ('SC', scores_sc)
-            ]
-
-            for alg, scores in algorithm_scores:
-                current_top_k = min(top_k, len(scores))
-                top_nodes = np.argsort(scores)[-current_top_k:]
-
-                infected_frac = compute_infected_fraction(
-                    incidence_matrix, top_nodes, lambda_val, nu,
-                    mu=1.0, num_runs=5
-                )
-                results[alg].append(infected_frac)
-                print(f"  {alg}: infected_frac={infected_frac:.4f}")
-
+        print(
+            f"nu={nu:.1f}: Enhanced-NuGNN: {results[nu]['Enhanced-NuGNN']:.4f}, DC: {results[nu].get('DC', 0.0):.4f}, BC: {results[nu].get('BC', 0.0):.4f}, HDC: {results[nu].get('HDC', 0.0):.4f}, SC: {results[nu].get('SC', 0.0):.4f}")
     return results
+
 
 # def evaluate_nu_aware_algorithms(incidence_matrix, features, edge_index, top_k, lambda_vals, nu_vals):
 #     num_nodes = incidence_matrix.shape[0]
@@ -375,151 +455,131 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_values, lambda_val
 #
 #     return results, train_losses, val_losses
 
-def plot_results(nu_vals, results, train_losses=None, val_losses=None):
-    plt.figure(figsize=(15, 5))
-
-    plt.subplot(1, 2, 1)
-    colors = {'Enhanced-NuGNN': 'blue', 'DC': 'green', 'BC': 'red', 'HDC': 'purple', 'SC': 'orange'}
-
-    for alg, fractions in results.items():
-        plt.plot(nu_vals, fractions, label=alg, color=colors[alg], marker='o')
-
-    plt.xlabel('Nonlinearity Degree (θ)')
+def plot_results(nu_vals, results):
+    colors = {
+        'Enhanced-NuGNN': 'blue',
+        'DC': 'red',
+        'BC': 'green',
+        'HDC': 'orange',
+        'SC': 'purple'
+    }
+    plt.figure(figsize=(10, 6))
+    if len(nu_vals) > 0 and results:  # 检查非空：len(nu_vals) 兼容 NumPy 数组
+        algorithms = list(results[nu_vals[0]].keys())  # 从第一个 nu 获取算法名
+        for alg in algorithms:
+            fractions = [results[nu].get(alg, 0.0) for nu in nu_vals]
+            plt.plot(nu_vals, fractions, label=alg, color=colors.get(alg, 'black'), marker='o')
+    else:
+        print("Warning: No results to plot")
+    plt.xlabel('ν')
     plt.ylabel('Infected Fraction')
     plt.title('Senate')
-    plt.xticks(nu_vals)
     plt.legend()
     plt.grid(True)
-
-    if train_losses and val_losses:
-        plt.subplot(1, 2, 2)
-        plt.plot(train_losses, label='Train Loss')
-        plt.plot(val_losses, label='Val Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training Curves')
-        plt.legend()
-        plt.grid(True)
-
     plt.tight_layout()
-    plt.savefig('senate2.82.png')
+    plt.savefig('senate2-dy-black .png')
     plt.show()
 
 
 if __name__ == "__main__":
-    # 清理旧缓存
+    set_seed(42)
+
+    # 清理缓存文件
     for cache_file in ["dr_ugcn_scores2.pkl", "baseline_scores.pkl"]:
         if os.path.exists(cache_file):
             try:
                 os.remove(cache_file)
                 print(f"Deleted cache file: {cache_file}")
-            except PermissionError:
-                print(f"Warning: Cannot remove {cache_file}, file in use")
+            except Exception as e:
+                print(f"Error removing {cache_file}: {e}")
 
+    # 1. 加载数据
     file_path = "hyperedges-senate-committees.txt"
     incidence_matrix, edge_index, node_id_map = load_hypergraph(file_path)
-
     print(f"Original incidence matrix shape: {incidence_matrix.shape}")
-
     num_nodes = incidence_matrix.shape[0]
-    top_k = int(0.08 * num_nodes)
+
+    # 2. 设置参数
     nu_vals = np.arange(1.0, 2.1, 0.1)
-    lambda_vals = [0.02]
+    lambda_vals = [0.04]
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    features = compute_features(incidence_matrix)
+    # 3. 计算特征
+    features = compute_features(incidence_matrix, nu_values=nu_vals)
+    if isinstance(features, list):
+        features = features[0]
     print(f"Features shape: {features.shape}")
+    features = torch.tensor(features, dtype=torch.float, device=device)
 
-    # 创建基础数据对象
+    # 4. 构建图数据
     data = Data(
         x=features,
         edge_index=edge_index,
         num_nodes=num_nodes
     )
 
-    # 使用 UniGEncoder 进行数据扩展（生成 Pv 和 PvT）
+    # 5. UniGEncoder 数据扩展
     unig_encoder = Unigencoder(
         in_channels=features.shape[1],
-        hidden_channels=128,
-        out_channels=128,
+        hidden_channels=256,
+        out_channels=256,
         num_layers=1,
         dropout=0.3
     )
-
     print("Expanding data with UniGEncoder...")
-    data = unig_encoder.d_expansion(data)  # 这会添加 Pv 和 PvT 属性
+    data = unig_encoder.d_expansion(data)
 
-    # 1. 生成高质量标签
-    print("=== Generating High-Quality Simulation Labels ===")
-    Y_high_quality = create_high_quality_multi_nu_labels(
-        incidence_matrix, lambda_vals[0], nu_vals, top_k_ratio=0.1
+    # if not hasattr(data, 'Pv'):
+    #     # 创建假的 Pv 和 PvT 以满足模型要求
+    #     num_nodes = data.num_nodes
+    #     num_edges = num_nodes  # 简单假设
+    #     data.Pv = torch.sparse_coo_tensor(
+    #         torch.zeros(2, 0, dtype=torch.long),
+    #         torch.zeros(0),
+    #         size=[num_edges, num_nodes]
+    #     ).to(device)
+    #     data.PvT = torch.sparse_coo_tensor(
+    #         torch.zeros(2, 0, dtype=torch.long),
+    #         torch.zeros(0),
+    #         size=[num_nodes, num_edges]
+    #     ).to(device)
+
+    # 6. 生成训练数据
+    print("=== 生成增强版训练数据 ===")
+    all_seed_sets, all_nu_values, all_infected_fracs = prepare_enhanced_training_data(
+        incidence_matrix, lambda_vals[0], nu_vals, top_k_ratio=0.04
     )
 
-    # 2. 添加标签到数据
-    y_avg = np.mean(Y_high_quality, axis=1)
-    data.y = torch.tensor(y_avg, dtype=torch.float).view(-1, 1)
-    data.Y_real = torch.tensor(Y_high_quality, dtype=torch.float)
+    # 转换为tensor并移动到设备
+    data.seed_sets = all_seed_sets
+    data.seed_set_nu = torch.tensor(all_nu_values, dtype=torch.float, device=device)
+    data.seed_set_labels = torch.tensor(all_infected_fracs, dtype=torch.float, device=device)
+    print(f"生成了 {len(all_seed_sets)} 个高质量训练样本")
 
-    # 3. 初始化新模型
-    model = NuAwareUniGCN(
+    # 7. 初始化模型
+    model = EnhancedNuAwareModel(
         in_channels=features.shape[1],
-        hidden_channels=128,
-        out_channels=1
+        hidden_channels=256,
+        out_channels=1,
+        num_raw_features=5  # HDC, RWHC, RWIEC, Motif, Overlap
     )
 
-    print(f"Model initialized with in_channels={features.shape[1]}")
-
-    # 4. 简化训练
-    print("=== Simplified Nu-Aware Training ===")
-    trained_model = focused_nu_training(
-        model, data, nu_vals, Y_high_quality,
-        focus_nu=1.4, epochs=200, lr=0.001
+    # 8. 训练模型
+    print("=== 训练增强版模型 ===")
+    # 注意：这里使用所有数据作为训练，因为我们的每个样本已经是不同nu的种子集
+    trained_model = train_enhanced_model(
+        model, data, incidence_matrix, train_idx=range(len(all_seed_sets)),
+        epochs=300, lr=0.001, patience=50
     )
 
-    # 5. 评估
-    results = evaluate_enhanced_model(trained_model, incidence_matrix, data, nu_vals, lambda_vals[0], top_k)
+    # 9. 评估模型性能
+    print("=== 评估模型性能 ===")
+    results = evaluate_enhanced_model(trained_model, incidence_matrix, data, nu_vals, lambda_vals[0])
+
+    # 10. 可视化结果
     plot_results(nu_vals, results)
 
-    # print(f"Incidence matrix shape: {incidence_matrix.shape}")
-    # print(f"Features shape: {features.shape}")
-    # print(f"Edge index shape: {edge_index.shape}")
-    #
-    # # results, train_losses, val_losses = evaluate_algorithms(
-    # #     incidence_matrix, features, edge_index, top_k, lambda_vals, nu_vals
-    # # )
-    #
-    # print(f"Creating nu-specific training labels...")
-    #
-    # nu_specific_labels = create_nu_specific_labels(
-    #     incidence_matrix, nu_vals, lambda_vals[0], 0.05
-    # )
-    #
-    # y_multi_nu = np.mean(nu_specific_labels, axis=1)
-    # y_tensor = torch.tensor(y_multi_nu, dtype=torch.float).reshape(-1, 1)
-    #
-    # data = Data(
-    #     x=features,
-    #     edge_index=edge_index,
-    #     y=y_tensor,
-    #     num_nodes=num_nodes,
-    #     nu_specific_labels=torch.tensor(nu_specific_labels, dtype=torch.float)
-    # )
-    #
-    # model = EnhancedNuAwareHyperGNN(
-    #     in_channels=features.shape[1],
-    #     hidden_channels=128,  # 这里需要明确指定hidden_channels大小
-    #     out_channels=1
-    # )
-    #
-    # train_idx, val_idx, test_idx = split_dataset(num_nodes)
-    #
-    # print("Starting stable nu-aware training...")
-    # trained_model, train_losses, val_losses = stable_nu_aware_training(
-    #     model, data, train_idx, val_idx, nu_vals, epochs=200, lr=0.0005
-    # )
-    #
-    # results = evaluate_enhanced_model(
-    #     trained_model, incidence_matrix, data, nu_vals, lambda_vals[0], top_k
-    # )
-    #
-    # plot_results(nu_vals, results, train_losses, val_losses)
+    # 11. 分析辅助权重
+    print("\n=== 分析辅助权重 ===")
+    analyze_auxiliary_weights(trained_model, data, nu_vals, incidence_matrix)
 
