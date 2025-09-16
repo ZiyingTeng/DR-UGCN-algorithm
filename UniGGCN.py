@@ -14,7 +14,7 @@ class UniGCNRegression(nn.Module):
         self.unig_encoder = Unigencoder(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
-            out_channels=hidden_channels,  # 输出隐藏维度
+            out_channels=hidden_channels,
             num_layers=1,
             dropout=dropout,
             Normalization='bn',
@@ -62,26 +62,18 @@ class UniGCNRegression(nn.Module):
             norm.reset_parameters()
 
     def forward(self, data):
-        x = data.x  # 直接使用原始特征
+        x_orig = data.x
+        x_unig = self.unig_encoder(data)
+        # 拼接原始特征和UniG特征
+        x = torch.cat([x_orig, x_unig], dim=-1)
+        
+        # GCN层
         for i, (conv, norm) in enumerate(zip(self.gcn_layers, self.norms)):
             x = conv(x, data.edge_index)
             x = norm(x)
             if i < len(self.gcn_layers) - 1:
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
+        
+
         return self.regressor(x)
-        # x_orig = data.x
-        # # UniG编码
-        # x_unig = self.unig_encoder(data)
-        # # 拼接原始特征和UniG特征
-        # x = torch.cat([x_orig, x_unig], dim=-1)
-        #
-        # # GCN层
-        # for i, (conv, norm) in enumerate(zip(self.gcn_layers, self.norms)):
-        #     x = conv(x, data.edge_index)
-        #     x = norm(x)
-        #     if i < len(self.gcn_layers) - 1:
-        #         x = F.relu(x)
-        #         x = F.dropout(x, p=self.dropout, training=self.training)
-        #
-        # return self.regressor(x)
