@@ -58,20 +58,11 @@ def compute_overlap_degree(incidence_matrix):
         overlap_degree[i] = total_overlap / count if count > 0 else 0
     return overlap_degree
 
-# def compute_edge_size_feature(incidence_matrix):
-#     edge_sizes = np.sum(incidence_matrix, axis=0).A1
-#     node_edge_sizes = np.zeros(incidence_matrix.shape[0])
-#     for i in range(incidence_matrix.shape[0]):
-#         edges = incidence_matrix[i].nonzero()[1]
-#         if len(edges) > 0:
-#             node_edge_sizes[i] = np.mean(edge_sizes[edges])
-#     return node_edge_sizes
-
 # 动态计算rwhc和rwiec
 
 def compute_features(incidence_matrix, nu_values=None):
     if nu_values is None:
-        nu_values = [1.0]  # 默认值
+        nu_values = [1.0]
     features_list = []
     for nu in nu_values:
         # 动态调整 RWHC 和 RWIEC 参数
@@ -90,39 +81,8 @@ def compute_features(incidence_matrix, nu_values=None):
             # compute_edge_size_feature(incidence_matrix)
         ]
         features_list.append(np.stack(features, axis=1))
-    # 如果只有一个 nu，返回单个特征矩阵；否则返回 nu-specific 特征列表
+
     return features_list[0] if len(nu_values) == 1 else features_list
-
-# def create_seed_set_simulation_labels(incidence_matrix, lambda_val, nu_values, top_k_base=0.05, num_runs=50, n_workers=8):
-#     num_nodes = incidence_matrix.shape[0]
-#     baseline_scores = {
-#         'HDC': compute_hdc(incidence_matrix),
-#         'DC': compute_dc(incidence_matrix),
-#         'BC': compute_bc(incidence_matrix),
-#         'SC': compute_sc(incidence_matrix),
-#         'RWHC': RWHCCalculator(incidence_matrix).calculate_rwhc(),
-#         'RWIEC': RWIECalculator(incidence_matrix).calculate_rwiec()
-#     }
-#     all_seed_sets = []
-#     all_nu_values = []
-#     all_infected_fracs = []
-#     print(f"Generating seed set simulation labels for {len(nu_values)} ν values...")
-#
-#     for nu in nu_values:
-#         print(f"Processing ν={nu:.1f}")
-#         top_k_ratio = max(0.02, top_k_base - 0.03 * (nu - 1.0))
-#         top_k = int(num_nodes * top_k_ratio)
-#         for method_name, scores in baseline_scores.items():
-#             top_nodes = np.argsort(scores)[-top_k:]
-#             all_seed_sets.append(top_nodes)
-#             all_nu_values.append(nu)
-#             infected_frac = compute_infected_fraction(incidence_matrix, top_nodes, lambda_val, nu, mu=1.0, num_runs=num_runs)
-#             all_infected_fracs.append(infected_frac)
-#             print(f"  {method_name}: infected_frac={infected_frac:.4f}")
-#
-#     return all_seed_sets, all_nu_values, all_infected_fracs
-
-
 
 def load_hypergraph(file_path):
     """从txt文件加载"""
@@ -158,7 +118,6 @@ def load_hypergraph_pickle(file_path):
     incidence_matrix = csr_matrix(incidence_matrix)
     node_degrees = np.sum(incidence_matrix, axis=1).A1
     edge_degrees = np.sum(incidence_matrix, axis=0).A1
-    # 去掉孤立节点
     non_isolated = node_degrees > 0
     if not non_isolated.all():
         incidence_matrix = incidence_matrix[non_isolated, :]
@@ -168,7 +127,6 @@ def load_hypergraph_pickle(file_path):
         non_empty = edge_degrees > 0
         incidence_matrix = incidence_matrix[:, non_empty]
         node_degrees = np.sum(incidence_matrix, axis=1).A1  # 更新
-    # 边索引
     adj = incidence_matrix.dot(incidence_matrix.T)
     adj.setdiag(0)
     edge_index = torch.tensor(np.vstack(np.nonzero(adj)), dtype=torch.long)
@@ -266,7 +224,6 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     """
     num_nodes = incidence_matrix.shape[0]
 
-    # 1. 计算五个特征
     features = {}
     features['HDC'] = compute_hdc(incidence_matrix)
     features['RWHC'] = RWHCCalculator(incidence_matrix).calculate_rwhc()
@@ -274,7 +231,6 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     features['Motif'] = compute_motif_coefficient(incidence_matrix)
     features['Overlap'] = compute_overlap_degree(incidence_matrix)
 
-    # 2. 动态权重初步设定
     if nu < 1.3:
         weights = np.array([0.5, 0.2, 0.1, 0.15, 0.05])  # 偏向HDC和Motif
     elif nu < 1.7:
@@ -282,7 +238,7 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     else:
         weights = np.array([0.2, 0.3, 0.25, 0.15, 0.1])  # 偏向RWHC和RWIEC
 
-    # 3. 计算初始分数并选择Top M节点
+    # 计算初始分数并选择Top M节点
     composite_scores = np.zeros(num_nodes)
     feature_keys = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap']
     for i, key in enumerate(feature_keys):
@@ -296,7 +252,7 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     top_m_indices = np.argsort(composite_scores)[-M:]
     top_k_indices = top_m_indices[-top_k:]  # 纯Top-K集
 
-    # 4. 生成多样化的候选集
+    # 生成多样化的候选集
     candidate_sets = []
 
     # 确保包含纯Top-K集
@@ -306,7 +262,6 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     for i in range(num_candidates - 1):
         if np.random.rand() < 0.5:  # 50%的概率进行随机替换
             candidate_set = top_k_indices.copy()
-            # 随机替换1-2个节点
             num_replace = np.random.randint(1, 0.3 * top_k) # 可以替换掉最多30%的节点
             for _ in range(num_replace):
                 # 随机选择一个要替换的位置
@@ -321,7 +276,7 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
             candidate_set = np.random.choice(top_m_indices, size=top_k, replace=False)
             candidate_sets.append(candidate_set)
 
-    # 5. 为每个候选集模拟得到真实分数
+    # 为每个候选集模拟得到真实分数
     candidate_scores = []
     print(f"为ν={nu:.1f}模拟{len(candidate_sets)}个候选集...")
 
@@ -339,9 +294,6 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
 
 
 def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_k_ratio=0.04):
-    """
-    为多个nu值准备训练数据
-    """
     num_nodes = incidence_matrix.shape[0]
     top_k = int(num_nodes * top_k_ratio)
 
@@ -365,5 +317,6 @@ def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_
         # 当前nu的最佳表现
         best_idx = np.argmax(candidate_scores)
         print(f"  ν={nu:.1f}最佳候选集分数: {candidate_scores[best_idx]:.4f}")
+
 
     return all_candidate_sets, all_nu_values, all_scores
