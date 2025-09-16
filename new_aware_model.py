@@ -12,15 +12,15 @@ class NuAwareUniGCN(nn.Module):
         self.weight_generator = nn.Sequential(
             nn.Linear(1, 32),
             nn.ReLU(),
-            nn.Linear(32, in_channels),  # 输出与特征数相同的权重
+            nn.Linear(32, in_channels),
             nn.Softmax(dim=-1)
         )
 
-        # UniGCN骨干网络 - 确保输入输出维度匹配
+        # UniGCN backbone
         self.backbone = UniGCNRegression(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
-            out_channels=hidden_channels,  # 输出隐藏维度，不是1
+            out_channels=hidden_channels,
             num_layers=3,
             dropout=0.3
         )
@@ -65,13 +65,11 @@ class NuAwareUniGCN(nn.Module):
         # 应用注意力权重
         attended_embeddings = node_embeddings * attention_weights
 
-        # 最终输出
         output = self.output_layer(attended_embeddings)
 
         return output
 
 # FiLM机制
-
 
 class NuAwareUniGCNWithFiLM(nn.Module):
     def __init__(self, in_channels, hidden_channels, out_channels):
@@ -80,7 +78,7 @@ class NuAwareUniGCNWithFiLM(nn.Module):
         # FiLM 层
         self.film = FiLMLayer(in_channels)
 
-        # UniGCN骨干网络
+        # UniGCN backbone
         self.backbone = UniGCNRegression(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
@@ -97,7 +95,6 @@ class NuAwareUniGCNWithFiLM(nn.Module):
             nn.Sigmoid()
         )
 
-        # 最终输出层
         self.output_layer = nn.Sequential(
             nn.Linear(hidden_channels, hidden_channels // 2),
             nn.ReLU(),
@@ -107,7 +104,6 @@ class NuAwareUniGCNWithFiLM(nn.Module):
         )
 
     def forward(self, data, nu, node_degrees=None):
-        # 应用FiLM变换
         filmed_x = self.film(data.x, nu)
 
         # 使用变换后的特征进行前向传播
@@ -128,7 +124,6 @@ class NuAwareUniGCNWithFiLM(nn.Module):
         # 应用注意力权重
         attended_embeddings = node_embeddings * attention_weights
 
-        # 最终输出
         output = self.output_layer(attended_embeddings)
 
         return output
@@ -196,7 +191,6 @@ class EnhancedNuAwareModel(nn.Module):
             nn.Softmax(dim=-1)
         )
 
-        # 初始化辅助网络，使其接近我们的先验知识
         self._initialize_auxiliary_net()
 
     def _initialize_auxiliary_net(self):
@@ -208,7 +202,6 @@ class EnhancedNuAwareModel(nn.Module):
                     nn.init.zeros_(layer.bias)
 
     def forward(self, data, nu, node_degrees=None, return_auxiliary=False):
-        # 准备nu张量
         if not isinstance(nu, torch.Tensor):
             nu_tensor = torch.tensor([nu], device=data.x.device, dtype=torch.float)
         else:
@@ -223,7 +216,7 @@ class EnhancedNuAwareModel(nn.Module):
         aux_weights = self.auxiliary_net(nu_tensor)  # [1, num_raw_features]
 
         # 计算线性分数（辅助目标）
-        raw_features = data.x[:, :self.num_raw_features]  # 前5个是原始特征
+        raw_features = data.x[:, :self.num_raw_features]
         aux_weights_expanded = aux_weights.expand(raw_features.size(0), -1)
         linear_scores = torch.sum(aux_weights_expanded * raw_features, dim=1, keepdim=True)
 
@@ -234,7 +227,6 @@ class EnhancedNuAwareModel(nn.Module):
 
         node_embeddings = self.backbone(data_copy)
 
-        # 处理节点度
         if node_degrees is None:
             node_degrees = torch.zeros(node_embeddings.size(0), 1, device=node_embeddings.device)
 
@@ -244,9 +236,9 @@ class EnhancedNuAwareModel(nn.Module):
         attention_weights = self.nu_attention(attention_input)
         attended_embeddings = node_embeddings * attention_weights
 
-        # 最终输出
         main_scores = self.output_layer(attended_embeddings)
 
         if return_auxiliary:
             return main_scores, linear_scores, aux_weights
+
         return main_scores, linear_scores
