@@ -31,7 +31,6 @@ def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, l
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
 
-    # 准备节点度特征
     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
@@ -59,15 +58,14 @@ def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, l
             # 前向传播
             main_scores, linear_scores = model(data, nu_val, node_degrees)
 
-            # 计算主损失：种子集总分 vs 真实分数
+            # 主要损失
             seed_set_scores = main_scores[seed_set]
             predicted_score = torch.sum(seed_set_scores)
             loss_main = F.mse_loss(predicted_score, true_score)
 
-            # 计算辅助损失：鼓励主分数与线性分数分布相似
+            # 辅助损失
             loss_aux = F.mse_loss(main_scores, linear_scores.detach())
 
-            # 组合损失
             alpha = 0.1  # 辅助损失权重
             loss = loss_main + alpha * loss_aux
 
@@ -79,7 +77,6 @@ def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, l
             total_main_loss += loss_main.item()
             total_aux_loss += loss_aux.item()
 
-        # 验证和早停逻辑
         avg_loss = total_loss / len(indices)
         avg_main_loss = total_main_loss / len(indices)
         avg_aux_loss = total_aux_loss / len(indices)
@@ -88,7 +85,6 @@ def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, l
             print(
                 f'Epoch {epoch:3d} | Loss: {avg_loss:.4f} (Main: {avg_main_loss:.4f}, Aux: {avg_aux_loss:.4f}) | LR: {optimizer.param_groups[0]["lr"]:.6f}')
 
-        # 早停逻辑
         if avg_loss < best_loss:
             best_loss = avg_loss
             patience_counter = 0
@@ -189,7 +185,6 @@ def focused_nu_training(model, data, nu_values, Y_real, focus_nu=1.4, epochs=200
 
     train_idx, val_idx, test_idx = split_dataset(data.num_nodes)
 
-    # 找到focus_nu对应的索引
     focus_idx = np.where(np.isclose(nu_values, focus_nu))[0][0]
 
     best_val_loss = float('inf')
@@ -200,12 +195,11 @@ def focused_nu_training(model, data, nu_values, Y_real, focus_nu=1.4, epochs=200
     for epoch in range(epochs):
         model.train()
 
-        # 动态调整训练策略：前期全面训练，后期专注薄弱点
         if epoch < epochs // 2:
-            # 前期：全面训练所有ν值
+            # 前期全面训练所有ν值
             nu_idx = np.random.randint(len(nu_values))
         else:
-            # 后期：50%概率训练focus_nu，50%概率训练其他ν
+            # 后期50%概率训练focus_nu，50%概率训练其他ν
             if np.random.rand() < 0.5:
                 nu_idx = focus_idx
             else:
@@ -245,7 +239,6 @@ def focused_nu_training(model, data, nu_values, Y_real, focus_nu=1.4, epochs=200
             print(f'Epoch {epoch}: ν={nu:.1f}, Train Loss: {loss.item():.4f}, '
                   f'Focus ν Loss: {focus_val_loss.item():.4f}, Overall Val Loss: {overall_val_loss:.4f}')
 
-        # 早停策略：基于整体性能
         if overall_val_loss < best_overall_loss:
             best_overall_loss = overall_val_loss
             best_val_loss = focus_val_loss.item()
@@ -330,7 +323,6 @@ def prepare_training_data(incidence_matrix, features, edge_index, top_k, lambda_
     rwiec_calc = RWIECalculator(incidence_matrix)
     scores_rwiec = rwiec_calc.calculate_rwiec(gamma=1.0)
 
-    # 动态加权组合
     composite_scores = []
     for nu in nu_vals:
         if nu < 1.3:
@@ -348,7 +340,6 @@ def prepare_training_data(incidence_matrix, features, edge_index, top_k, lambda_
                            weights[2] * scores_rwiec)
         composite_scores.append(composite_score)
 
-    # 平均
     avg_scores = np.mean(composite_scores, axis=0)
     top_nodes = np.argsort(avg_scores)[-top_k:]
 
@@ -374,9 +365,8 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
             node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1,
                                                                                                                      1)
 
-            # 修改这里：模型返回元组 (main_scores, linear_scores)，我们只需要 main_scores
             main_scores, linear_scores = model(data, nu, node_degrees)
-            node_scores = main_scores.cpu().numpy().flatten()  # 只取主分数
+            node_scores = main_scores.cpu().numpy().flatten()
 
         top_nodes = np.argsort(node_scores)[-top_k:]
         infected_frac = compute_infected_fraction(incidence_matrix, top_nodes, lambda_val, nu, mu=1.0,
@@ -405,55 +395,6 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
         print(
             f"nu={nu:.1f}: Enhanced-NuGNN: {results[nu]['Enhanced-NuGNN']:.4f}, DC: {results[nu].get('DC', 0.0):.4f}, BC: {results[nu].get('BC', 0.0):.4f}, HDC: {results[nu].get('HDC', 0.0):.4f}, SC: {results[nu].get('SC', 0.0):.4f}")
     return results
-
-
-# def evaluate_nu_aware_algorithms(incidence_matrix, features, edge_index, top_k, lambda_vals, nu_vals):
-#     num_nodes = incidence_matrix.shape[0]
-#
-#     # 初始化模型
-#     model = EnhancedNuAwareHyperGNN(
-#         in_channels=features.shape[1],
-#         hidden_channels=128,
-#         out_channels=1,
-#         num_nu_bins=len(nu_vals)
-#     )
-#
-#     # 准备训练数据（使用多个θ值的混合目标）
-#     lambda_val = lambda_vals[0]
-#     y = prepare_multi_nu_training_data(incidence_matrix, top_k, lambda_val, nu_vals)
-#     y = torch.tensor(y, dtype=torch.float).reshape(-1, 1)
-#
-#     data = Data(x=features, edge_index=edge_index, y=y, num_nodes=num_nodes)
-#
-#     train_idx, val_idx, test_idx = split_dataset(num_nodes)
-#
-#     print("Training Nu-aware model...")
-#     model, train_losses, val_losses = stable_nu_aware_training(
-#         model, data, train_idx, val_idx, nu_vals, epochs=150, lr=0.001
-#     )
-#
-#     model.eval()
-#     results = {alg: [] for alg in ['DR-UGCN', 'DC', 'BC', 'HDC', 'SC']}
-#
-#     with torch.no_grad():
-#         for nu in nu_vals:
-#             scores_dr_ugcn = model(data, nu).squeeze().cpu().numpy()
-#
-#             for alg, scores in [
-#                 ('DR-UGCN', scores_dr_ugcn),
-#                 ('DC', compute_dc(incidence_matrix)),
-#                 ('BC', compute_bc(incidence_matrix)),
-#                 ('HDC', compute_hdc(incidence_matrix)),
-#                 ('SC', compute_sc(incidence_matrix))
-#             ]:
-#                 top_nodes = np.argsort(scores)[-top_k:]
-#                 infected_frac = compute_infected_fraction(
-#                     incidence_matrix, top_nodes, lambda_val, nu, mu=1.0, num_runs=5
-#                 )
-#                 results[alg].append(infected_frac)
-#                 print(f"  {alg}: infected_frac={infected_frac:.4f}")
-#
-#     return results, train_losses, val_losses
 
 def plot_results(nu_vals, results):
     colors = {
@@ -529,21 +470,6 @@ if __name__ == "__main__":
     print("Expanding data with UniGEncoder...")
     data = unig_encoder.d_expansion(data)
 
-    # if not hasattr(data, 'Pv'):
-    #     # 创建假的 Pv 和 PvT 以满足模型要求
-    #     num_nodes = data.num_nodes
-    #     num_edges = num_nodes  # 简单假设
-    #     data.Pv = torch.sparse_coo_tensor(
-    #         torch.zeros(2, 0, dtype=torch.long),
-    #         torch.zeros(0),
-    #         size=[num_edges, num_nodes]
-    #     ).to(device)
-    #     data.PvT = torch.sparse_coo_tensor(
-    #         torch.zeros(2, 0, dtype=torch.long),
-    #         torch.zeros(0),
-    #         size=[num_nodes, num_edges]
-    #     ).to(device)
-
     # 6. 生成训练数据
     print("=== 生成增强版训练数据 ===")
     all_seed_sets, all_nu_values, all_infected_fracs = prepare_enhanced_training_data(
@@ -582,4 +508,5 @@ if __name__ == "__main__":
     # 11. 分析辅助权重
     print("\n=== 分析辅助权重 ===")
     analyze_auxiliary_weights(trained_model, data, nu_vals, incidence_matrix)
+
 
