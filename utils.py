@@ -278,7 +278,7 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
 
     # 为每个候选集模拟得到真实分数
     candidate_scores = []
-    print(f"为ν={nu:.1f}模拟{len(candidate_sets)}个候选集...")
+    print(f"为θ={nu:.1f}模拟{len(candidate_sets)}个候选集...")
 
     for i, candidate_set in enumerate(candidate_sets):
         infected_frac = compute_infected_fraction(
@@ -301,9 +301,9 @@ def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_
     all_nu_values = []
     all_scores = []
 
-    print("开始生成增强版训练数据...")
+    print("开始生成训练数据...")
     for nu in nu_values:
-        print(f"处理 ν={nu:.1f}")
+        print(f"处理 θ={nu:.1f}")
 
         candidate_sets, candidate_scores = generate_dynamic_candidate_sets(
             incidence_matrix, nu, top_k, lambda_val,
@@ -314,9 +314,10 @@ def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_
         all_nu_values.extend([nu] * len(candidate_sets))
         all_scores.extend(candidate_scores)
 
-        # 当前nu的最佳表现
+        # 当前θ的最佳表现
         best_idx = np.argmax(candidate_scores)
-        print(f"  ν={nu:.1f}最佳候选集分数: {candidate_scores[best_idx]:.4f}")
+        print(f"  θ={nu:.1f}最佳候选集分数: {candidate_scores[best_idx]:.4f}")
 
 
     return all_candidate_sets, all_nu_values, all_scores
+
