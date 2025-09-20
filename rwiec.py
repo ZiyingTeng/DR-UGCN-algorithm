@@ -13,7 +13,7 @@ class RWIECalculator:
             raise ValueError("Stationary distribution not normalized")
 
     def calculate_dynamic_entropy(self, gamma=1.0):
-        """计算动态转移熵，加入幂律加权"""
+        """计算动态转移熵"""
         dynamic_entropy = np.zeros(self.n_nodes)
         for v in range(self.n_nodes):
             non_zero_idx = np.where(self.transition_matrix[v] > 0)[0]
@@ -96,4 +96,5 @@ class RWIECalculator:
 #         stat_entropy = self.calculate_stationary_entropy()
 #         rwiec = dyn_entropy + stat_entropy
 #         return rwiec
+
 
