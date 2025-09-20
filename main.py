@@ -1,5 +1,3 @@
-# θ从1到2
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -58,7 +56,7 @@ def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, l
             # 前向传播
             main_scores, linear_scores = model(data, nu_val, node_degrees)
 
-            # 主要损失
+            # 主损失
             seed_set_scores = main_scores[seed_set]
             predicted_score = torch.sum(seed_set_scores)
             loss_main = F.mse_loss(predicted_score, true_score)
@@ -66,8 +64,8 @@ def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, l
             # 辅助损失
             loss_aux = F.mse_loss(main_scores, linear_scores.detach())
 
-            alpha = 0.1  # 辅助损失权重
-            loss = loss_main + alpha * loss_aux
+            alpha = 0.1  # 辅助损失的权重
+            loss = loss_main + alpha * loss_aux # 这里有一个问题 我不确定将主损失和辅助损失加权结合这一操作是否符合逻辑 是否能够让模型真正学习到其表达的内容
 
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -107,12 +105,11 @@ def analyze_auxiliary_weights(model, data, nu_values, incidence_matrix):
     device = next(model.parameters()).device
     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
 
-    print("辅助网络学到的特征权重随nu的变化:")
+    print("辅助网络学到的特征权重随θ的变化:")
     feature_names = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap']
 
     for nu in nu_values:
         with torch.no_grad():
-            # 修改这里：模型返回元组，第三个元素是辅助权重
             _, _, aux_weights = model(data, nu, node_degrees, return_auxiliary=True)
 
         weights = aux_weights.squeeze().cpu().numpy()
@@ -120,6 +117,7 @@ def analyze_auxiliary_weights(model, data, nu_values, incidence_matrix):
 
 
 def train_with_seed_sets(model, data, epochs=200, lr=0.001, patience=30, focus_nu_range=(1.3, 1.8)):
+    """着眼于节点集的训练"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
@@ -173,7 +171,7 @@ def train_with_seed_sets(model, data, epochs=200, lr=0.001, patience=30, focus_n
 
 
 def focused_nu_training(model, data, nu_values, Y_real, focus_nu=1.4, epochs=200, lr=0.001):
-    """专注于特定ν值的训练，同时保持整体性能"""
+    """专注于特定θ值的训练，同时保持整体性能"""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.to(device)
     data = data.to(device)
@@ -196,7 +194,7 @@ def focused_nu_training(model, data, nu_values, Y_real, focus_nu=1.4, epochs=200
         model.train()
 
         if epoch < epochs // 2:
-            # 前期全面训练所有ν值
+            # 前期全面训练所有θ值
             nu_idx = np.random.randint(len(nu_values))
         else:
             # 后期50%概率训练focus_nu，50%概率训练其他ν
@@ -434,32 +432,27 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Error removing {cache_file}: {e}")
 
-    # 1. 加载数据
     file_path = "hyperedges-senate-committees.txt"
     incidence_matrix, edge_index, node_id_map = load_hypergraph(file_path)
     print(f"Original incidence matrix shape: {incidence_matrix.shape}")
     num_nodes = incidence_matrix.shape[0]
 
-    # 2. 设置参数
     nu_vals = np.arange(1.0, 2.1, 0.1)
     lambda_vals = [0.04]
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    # 3. 计算特征
     features = compute_features(incidence_matrix, nu_values=nu_vals)
     if isinstance(features, list):
         features = features[0]
     print(f"Features shape: {features.shape}")
     features = torch.tensor(features, dtype=torch.float, device=device)
 
-    # 4. 构建图数据
     data = Data(
         x=features,
         edge_index=edge_index,
         num_nodes=num_nodes
     )
 
-    # 5. UniGEncoder 数据扩展
     unig_encoder = Unigencoder(
         in_channels=features.shape[1],
         hidden_channels=256,
@@ -470,8 +463,7 @@ if __name__ == "__main__":
     print("Expanding data with UniGEncoder...")
     data = unig_encoder.d_expansion(data)
 
-    # 6. 生成训练数据
-    print("=== 生成增强版训练数据 ===")
+    print("=== 生成训练数据 ===")
     all_seed_sets, all_nu_values, all_infected_fracs = prepare_enhanced_training_data(
         incidence_matrix, lambda_vals[0], nu_vals, top_k_ratio=0.04
     )
@@ -482,7 +474,6 @@ if __name__ == "__main__":
     data.seed_set_labels = torch.tensor(all_infected_fracs, dtype=torch.float, device=device)
     print(f"生成了 {len(all_seed_sets)} 个高质量训练样本")
 
-    # 7. 初始化模型
     model = EnhancedNuAwareModel(
         in_channels=features.shape[1],
         hidden_channels=256,
@@ -490,23 +481,19 @@ if __name__ == "__main__":
         num_raw_features=5  # HDC, RWHC, RWIEC, Motif, Overlap
     )
 
-    # 8. 训练模型
-    print("=== 训练增强版模型 ===")
-    # 注意：这里使用所有数据作为训练，因为我们的每个样本已经是不同nu的种子集
+    print("=== 训练模型 ===")
     trained_model = train_enhanced_model(
         model, data, incidence_matrix, train_idx=range(len(all_seed_sets)),
         epochs=300, lr=0.001, patience=50
     )
-
-    # 9. 评估模型性能
+    
     print("=== 评估模型性能 ===")
     results = evaluate_enhanced_model(trained_model, incidence_matrix, data, nu_vals, lambda_vals[0])
 
-    # 10. 可视化结果
     plot_results(nu_vals, results)
 
-    # 11. 分析辅助权重
     print("\n=== 分析辅助权重 ===")
     analyze_auxiliary_weights(trained_model, data, nu_vals, incidence_matrix)
+
 
 
