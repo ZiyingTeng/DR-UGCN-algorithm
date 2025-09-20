@@ -311,48 +311,6 @@ def train_model(model, data, train_idx, val_idx, epochs=500, lr=0.001, patience=
         model.load_state_dict(torch.load('best_model.pth', map_location=device))
     return model, train_losses, val_losses
 
-
-def prepare_training_data(incidence_matrix, features, edge_index, top_k, lambda_val, nu_vals):
-    """使用多种中心性组合生成训练数据"""
-    num_nodes = incidence_matrix.shape[0]
-    scores_hdc = compute_hdc(incidence_matrix)
-    rwhc_calc = RWHCCalculator(incidence_matrix)
-    scores_rwhc = rwhc_calc.calculate_rwhc()
-    rwiec_calc = RWIECalculator(incidence_matrix)
-    scores_rwiec = rwiec_calc.calculate_rwiec(gamma=1.0)
-
-    composite_scores = []
-    for nu in nu_vals:
-        if nu < 1.3:
-            # 低非线性：偏向HDC和RWHC
-            weights = [0.5, 0.3, 0.2]
-        elif nu < 1.7:
-            # 中等非线性
-            weights = [0.4, 0.3, 0.3]
-        else:
-            # 高非线性：偏向RWIEC
-            weights = [0.3, 0.3, 0.4]
-
-        composite_score = (weights[0] * scores_hdc +
-                           weights[1] * scores_rwhc +
-                           weights[2] * scores_rwiec)
-        composite_scores.append(composite_score)
-
-    avg_scores = np.mean(composite_scores, axis=0)
-    top_nodes = np.argsort(avg_scores)[-top_k:]
-
-    y = np.zeros(num_nodes)
-    for nu in nu_vals:
-        infected_frac = compute_infected_fraction(
-            incidence_matrix, top_nodes, lambda_val, nu,
-            mu=1.0, num_runs=5
-        )
-        y[top_nodes] += infected_frac
-
-    y[top_nodes] /= len(nu_vals)
-    return torch.tensor(y, dtype=torch.float).reshape(-1, 1)
-
-
 def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, top_k_base=0.05, num_runs=100):
     results = {}
     for nu in nu_vals:
@@ -494,6 +452,7 @@ if __name__ == "__main__":
 
     print("\n=== 分析辅助权重 ===")
     analyze_auxiliary_weights(trained_model, data, nu_vals, incidence_matrix)
+
 
 
 
