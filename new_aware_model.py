@@ -25,7 +25,7 @@ class NuAwareUniGCN(nn.Module):
             dropout=0.3
         )
 
-        # 基于ν的注意力机制
+        # 基于θ的注意力机制
         self.nu_attention = nn.Sequential(
             nn.Linear(hidden_channels + 1, hidden_channels // 2),
             nn.ReLU(),
@@ -57,7 +57,7 @@ class NuAwareUniGCN(nn.Module):
         # 获取UniGCN的输出
         node_embeddings = self.backbone(data_copy)  # [num_nodes, hidden_channels]
 
-        # 基于ν的注意力机制
+        # 基于θ的注意力机制
         nu_expanded = nu_tensor.expand(node_embeddings.size(0), -1)
         attention_input = torch.cat([node_embeddings, nu_expanded], dim=1)
         attention_weights = self.nu_attention(attention_input)
@@ -87,7 +87,7 @@ class NuAwareUniGCNWithFiLM(nn.Module):
             dropout=0.3
         )
 
-        # 基于ν和节点度的注意力机制
+        # 基于θ和节点度的注意力机制
         self.nu_attention = nn.Sequential(
             nn.Linear(hidden_channels + 2, hidden_channels // 2),  # +2 for nu and node_degrees
             nn.ReLU(),
@@ -168,7 +168,7 @@ class EnhancedNuAwareModel(nn.Module):
             dropout=0.3
         )
 
-        # 基于nu和节点度的注意力机制
+        # 基于θ和节点度的注意力机制
         self.nu_attention = nn.Sequential(
             nn.Linear(hidden_channels + 2, hidden_channels // 2),
             nn.ReLU(),
@@ -215,7 +215,7 @@ class EnhancedNuAwareModel(nn.Module):
         # 辅助通路：生成特征权重
         aux_weights = self.auxiliary_net(nu_tensor)  # [1, num_raw_features]
 
-        # 计算线性分数（辅助目标）
+        # 计算线性分数
         raw_features = data.x[:, :self.num_raw_features]
         aux_weights_expanded = aux_weights.expand(raw_features.size(0), -1)
         linear_scores = torch.sum(aux_weights_expanded * raw_features, dim=1, keepdim=True)
@@ -242,3 +242,4 @@ class EnhancedNuAwareModel(nn.Module):
             return main_scores, linear_scores, aux_weights
 
         return main_scores, linear_scores
+
