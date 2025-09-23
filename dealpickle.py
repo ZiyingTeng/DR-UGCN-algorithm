@@ -28,7 +28,7 @@ def process_pickle_file(file_path):
             print(f"Error: Pickle file {file_path} does not contain a dictionary, got {type(data)}")
             return None, None
 
-        # 收集所有唯一的节点ID（支持字符串和整数）
+        # 收集所有唯一的节点ID
         node_set = set()
         for key, values in data.items():
             if not isinstance(values, (list, set, tuple)):

@@ -1,3 +1,4 @@
+from random import random
 
 import torch
 import torch.nn as nn
@@ -20,8 +21,8 @@ class UniGCNRegression(nn.Module):
             Normalization='bn',
             InputNorm=True
         )
-
-        first_layer_input = in_channels + hidden_channels # 按照原本设定，要保留原始特征，将两者拼接，所以这里动态设定第一层的维度比较保险
+        # 动态计算第一层输入维度
+        first_layer_input = in_channels + hidden_channels
 
         # GCN层
         self.gcn_layers = nn.ModuleList()
@@ -66,16 +67,32 @@ class UniGCNRegression(nn.Module):
     def forward(self, data):
         x_orig = data.x
         x_unig = self.unig_encoder(data)
-        x = torch.cat([x_orig, x_unig], dim=-1) # 拼接
-        
-        # GCN层
+
+        # 拼接原始特征和UniG特征
+        x = torch.cat([x_orig, x_unig], dim=-1)
+
+        previous_outputs = []  # 保存各层输出用于跳跃连接
+
         for i, (conv, norm) in enumerate(zip(self.gcn_layers, self.norms)):
+            residual = x if i > 0 else 0  # 第一层无残差
+
             x = conv(x, data.edge_index)
             x = norm(x)
+
+            if i > 0 and previous_outputs:
+                # 从previous_outputs中选择一个合适的层进行跳跃连接
+                if len(previous_outputs) > 0:
+                    skip_source = previous_outputs[-1]  # 使用上一层的输出
+                    if skip_source.shape[-1] != x.shape[-1]:
+                        # 如果维度不匹配，使用线性投影
+                        skip_projection = nn.Linear(skip_source.shape[-1], x.shape[-1]).to(x.device)
+                        skip_source = skip_projection(skip_source)
+                    x = x + skip_source  # 残差连接
+
+            previous_outputs.append(x.clone())
+
             if i < len(self.gcn_layers) - 1:
                 x = F.relu(x)
                 x = F.dropout(x, p=self.dropout, training=self.training)
-        
 
         return self.regressor(x)
-

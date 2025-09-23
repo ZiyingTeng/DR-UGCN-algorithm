@@ -12,15 +12,15 @@ class NuAwareUniGCN(nn.Module):
         self.weight_generator = nn.Sequential(
             nn.Linear(1, 32),
             nn.ReLU(),
-            nn.Linear(32, in_channels),
+            nn.Linear(32, in_channels),  # 输出与特征数相同的权重
             nn.Softmax(dim=-1)
         )
 
-        # UniGCN backbone
+        # UniGCN骨干网络 - 确保输入输出维度匹配
         self.backbone = UniGCNRegression(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
-            out_channels=hidden_channels,
+            out_channels=hidden_channels,  # 输出隐藏维度，不是1
             num_layers=3,
             dropout=0.3
         )
@@ -57,7 +57,7 @@ class NuAwareUniGCN(nn.Module):
         # 获取UniGCN的输出
         node_embeddings = self.backbone(data_copy)  # [num_nodes, hidden_channels]
 
-        # 基于θ的注意力机制
+        # 基于ν的注意力机制
         nu_expanded = nu_tensor.expand(node_embeddings.size(0), -1)
         attention_input = torch.cat([node_embeddings, nu_expanded], dim=1)
         attention_weights = self.nu_attention(attention_input)
@@ -65,6 +65,7 @@ class NuAwareUniGCN(nn.Module):
         # 应用注意力权重
         attended_embeddings = node_embeddings * attention_weights
 
+        # 最终输出
         output = self.output_layer(attended_embeddings)
 
         return output
@@ -78,7 +79,7 @@ class NuAwareUniGCNWithFiLM(nn.Module):
         # FiLM 层
         self.film = FiLMLayer(in_channels)
 
-        # UniGCN backbone
+        # UniGCN骨干网络
         self.backbone = UniGCNRegression(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
@@ -95,6 +96,7 @@ class NuAwareUniGCNWithFiLM(nn.Module):
             nn.Sigmoid()
         )
 
+        # 最终输出层
         self.output_layer = nn.Sequential(
             nn.Linear(hidden_channels, hidden_channels // 2),
             nn.ReLU(),
@@ -104,6 +106,7 @@ class NuAwareUniGCNWithFiLM(nn.Module):
         )
 
     def forward(self, data, nu, node_degrees=None):
+        # 应用FiLM变换
         filmed_x = self.film(data.x, nu)
 
         # 使用变换后的特征进行前向传播
@@ -113,7 +116,7 @@ class NuAwareUniGCNWithFiLM(nn.Module):
         # 获取UniGCN的输出
         node_embeddings = self.backbone(data_copy)
 
-        # 基于ν和节点度的注意力机制
+        # 基于θ和节点度的注意力机制
         nu_tensor = torch.tensor([nu], device=node_embeddings.device, dtype=torch.float).view(1, 1)
         nu_expanded = nu_tensor.expand(node_embeddings.size(0), -1)
         if node_degrees is None:
@@ -124,6 +127,7 @@ class NuAwareUniGCNWithFiLM(nn.Module):
         # 应用注意力权重
         attended_embeddings = node_embeddings * attention_weights
 
+        # 最终输出
         output = self.output_layer(attended_embeddings)
 
         return output
@@ -154,9 +158,21 @@ class FiLMLayer(nn.Module):
 
 
 class EnhancedNuAwareModel(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_raw_features=5):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_raw_features=5, num_heads=4):
         super().__init__()
         self.num_raw_features = num_raw_features
+        self.num_heads = num_heads
+        # 更温和的标准化
+        self.feature_norm = nn.BatchNorm1d(in_channels, affine=False)  # 只标准化，不学习参数
+
+        # 特征重要性保护机制
+        self.feature_importance_preserver = nn.Parameter(torch.ones(num_raw_features))
+
+        # 动态调整FiLM强度
+        self.film_strength = nn.Parameter(torch.tensor(0.5))  # 可学习的强度参数
+
+        # 更稳健的辅助网络初始化
+        self._initialize_with_prior_knowledge()
 
         # 主通路 - 非线性黑箱
         self.film = FiLMLayer(in_channels)
@@ -164,18 +180,23 @@ class EnhancedNuAwareModel(nn.Module):
             in_channels=in_channels,
             hidden_channels=hidden_channels,
             out_channels=hidden_channels,
-            num_layers=3,
-            dropout=0.3
+            num_layers=4,
+            dropout=0.4
         )
 
-        # 基于θ和节点度的注意力机制
-        self.nu_attention = nn.Sequential(
-            nn.Linear(hidden_channels + 2, hidden_channels // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_channels // 2, 1),
-            nn.Sigmoid()
-        )
+        # 多头注意力机制
+        self.multi_head_attention = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_channels + 2, hidden_channels // 2),
+                nn.ReLU(),
+                nn.Linear(hidden_channels // 2, 1),
+                nn.Sigmoid()
+            ) for _ in range(num_heads)
+        ])
 
+        self.attention_combiner = nn.Linear(num_heads, 1)
+
+        # 输出层
         self.output_layer = nn.Sequential(
             nn.Linear(hidden_channels, hidden_channels // 2),
             nn.ReLU(),
@@ -183,7 +204,7 @@ class EnhancedNuAwareModel(nn.Module):
             nn.Linear(hidden_channels // 2, out_channels)
         )
 
-        # 辅助通路 - 可解释权重生成
+        # 辅助通路
         self.auxiliary_net = nn.Sequential(
             nn.Linear(1, 32),
             nn.ReLU(),
@@ -191,7 +212,14 @@ class EnhancedNuAwareModel(nn.Module):
             nn.Softmax(dim=-1)
         )
 
-        self._initialize_auxiliary_net()
+        # 记忆增强
+        self.memory_bank = nn.Parameter(torch.randn(30, hidden_channels))  # 30个记忆模式
+        self.memory_attention = nn.Sequential(
+            nn.Linear(hidden_channels * 2, hidden_channels),
+            nn.ReLU(),
+            nn.Linear(hidden_channels, 1),
+            nn.Sigmoid()
+        )
 
     def _initialize_auxiliary_net(self):
         """用合理的初始值初始化辅助网络"""
@@ -201,7 +229,23 @@ class EnhancedNuAwareModel(nn.Module):
                 if layer.bias is not None:
                     nn.init.zeros_(layer.bias)
 
+    def _initialize_with_prior_knowledge(self):
+        """基于先验知识初始化辅助网络"""
+        # ν=1.0时，HDC应该权重较高；ν>1.5时，RWHC/RWIEC权重升高
+        with torch.no_grad():
+            # 设置合理的初始偏置
+            self.auxiliary_net[2].bias.data = torch.tensor([0.3, 0.2, 0.2, 0.15, 0.15])  # HDC, RWHC, RWIEC, Motif, overlap
+
     def forward(self, data, nu, node_degrees=None, return_auxiliary=False):
+        # 保护原始特征的重要性
+        raw_features = data.x[:, :self.num_raw_features]
+        protected_features = raw_features * self.feature_importance_preserver
+
+        # 将保护后的特征与其他特征结合
+        processed_features = torch.cat([protected_features, data.x[:, self.num_raw_features:]], dim=1)
+        processed_features = self.feature_norm(processed_features)
+
+        # 准备θ张量
         if not isinstance(nu, torch.Tensor):
             nu_tensor = torch.tensor([nu], device=data.x.device, dtype=torch.float)
         else:
@@ -227,19 +271,44 @@ class EnhancedNuAwareModel(nn.Module):
 
         node_embeddings = self.backbone(data_copy)
 
+        # 处理节点度
         if node_degrees is None:
             node_degrees = torch.zeros(node_embeddings.size(0), 1, device=node_embeddings.device)
 
-        # 注意力机制
+        # 多头注意力机制
         nu_expanded = nu_tensor.expand(node_embeddings.size(0), -1)
         attention_input = torch.cat([node_embeddings, nu_expanded, node_degrees], dim=1)
-        attention_weights = self.nu_attention(attention_input)
-        attended_embeddings = node_embeddings * attention_weights
 
+        # 各头独立计算注意力
+        head_outputs = []
+        for head in self.multi_head_attention:
+            head_weights = head(attention_input)
+            head_outputs.append(head_weights)
+
+        # 组合多头结果
+        attention_weights = torch.cat(head_outputs, dim=1)
+        combined_weights = self.attention_combiner(attention_weights)
+
+        # 记忆增强
+        memory_enhanced = self._apply_memory_enhancement(node_embeddings)
+
+        attended_embeddings = memory_enhanced * combined_weights
+
+        # 最终输出
         main_scores = self.output_layer(attended_embeddings)
 
         if return_auxiliary:
-            return main_scores, linear_scores, aux_weights
-
+            return main_scores, linear_scores, aux_weights, attention_weights
         return main_scores, linear_scores
 
+    def _apply_memory_enhancement(self, embeddings):
+        """轻量级记忆增强"""
+        # 计算与记忆模式的相似度
+        similarity = torch.matmul(embeddings, self.memory_bank.t())
+        attention_weights = F.softmax(similarity, dim=1)
+
+        # 加权记忆反馈
+        memory_output = torch.matmul(attention_weights, self.memory_bank)
+
+        # 残差连接
+        return embeddings + 0.3 * memory_output

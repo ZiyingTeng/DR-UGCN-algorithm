@@ -94,7 +94,7 @@ class RWHCCalculator:
         return heat
 
     def calculate_rwhc(self, max_iter=1000, tol=1e-6, lambda_val=5e-3, theta=1.25, alpha=0.7):
-        """计算RWHC"""
+        """计算RWHC，保持数值幅度"""
         heat = self.initialize_heat(lambda_val, theta)
         laplacian = self.build_laplacian_matrix()
         initial_heat = heat.copy()
@@ -102,7 +102,7 @@ class RWHCCalculator:
         for _ in range(max_iter):
             heat_new = alpha * (heat - laplacian @ heat) + (1 - alpha) * initial_heat
 
-            # 移除迭代中的归一化，避免与其他特征放在一起时作用太小
+            # 移除迭代中的归一化
             # if np.sum(heat_new) > 0:
             #     heat_new /= np.sum(heat_new)
 

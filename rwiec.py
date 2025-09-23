@@ -97,4 +97,3 @@ class RWIECalculator:
 #         rwiec = dyn_entropy + stat_entropy
 #         return rwiec
 
-

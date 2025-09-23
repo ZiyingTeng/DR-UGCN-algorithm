@@ -50,12 +50,13 @@ class HypergraphContagion:
         self.update_node_infection_rates()
         return True
 
-    def simulate(self, max_steps=15000, tolerance=1e-6, min_rate=1e-4, stable_steps=200):
+    def simulate(self, max_steps=15000, tolerance=1e-6, min_rate=1e-4, stable_steps=200, return_curve=False):
         min_rate = max(min_rate, self.lambda_val * 1e-2)
         prev_infected = np.sum(self.infected)
         stationary_steps = 0
         rate_low_steps = 0
         infected_fractions = []
+        time_steps = []
 
         for step in range(max_steps):
             if not self.step():
@@ -66,7 +67,9 @@ class HypergraphContagion:
                 rate_low_steps = 0
 
             current_infected = np.sum(self.infected)
-            infected_fractions.append(current_infected / self.N)
+            current_frac = current_infected / self.N
+            infected_fractions.append(current_frac)
+            time_steps.append(step)
 
             if abs(current_infected - prev_infected) < tolerance:
                 stationary_steps += 1
@@ -77,7 +80,12 @@ class HypergraphContagion:
 
             prev_infected = current_infected
 
-        return np.mean(infected_fractions[-100:]) if len(infected_fractions) >= 100 else np.mean(infected_fractions)
-
+        if len(infected_fractions) >= 100:
+            if return_curve:
+                return np.mean(infected_fractions[-100:]), infected_fractions, time_steps
+            else:
+                return np.mean(infected_fractions[-100:])
+        else:
+            return np.mean(infected_fractions)
 
 

@@ -1,3 +1,5 @@
+from scipy import sparse
+
 from dealpickle import process_pickle_file
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -58,31 +60,159 @@ def compute_overlap_degree(incidence_matrix):
         overlap_degree[i] = total_overlap / count if count > 0 else 0
     return overlap_degree
 
+def compute_pagerank(incidence_matrix):
+    num_nodes = incidence_matrix.shape[0]
+    node_degrees = np.sum(incidence_matrix, axis=1).A1
+    alpha = 0.85
+    max_iter = 100
+    tol = 1e-6
+    # 确保矩阵是CSR格式以提高效率
+    H_mat = incidence_matrix.tocsr()
+
+    # 设置权重（默认为1）
+    weights = np.ones(H_mat.shape[1])  # 每条超边的权重
+    edge_degrees = np.sum(incidence_matrix, axis=0).A1
+    node_degrees[node_degrees == 0] = 1
+    edge_degrees[edge_degrees == 0] = 1
+
+    # 构建对角矩阵的逆
+    D_v_inv = sparse.diags(1.0 / node_degrees)  # 节点度矩阵的逆
+    W = sparse.diags(weights)  # 超边权重矩阵
+    D_e_inv = sparse.diags(1.0 / edge_degrees)  # 超边度矩阵的逆
+
+    # 构建转移概率矩阵 P = D_v^{-1} H W D_e^{-1} H^T
+    P = D_v_inv.dot(H_mat).dot(W).dot(D_e_inv).dot(H_mat.T)
+
+    # 转换为CSR格式
+    P = P.tocsr()
+
+    print(f"转移矩阵P的形状: {P.shape}")
+    print(f"P的非零元素数量: {P.nnz}")
+
+    # 初始化PageRank向量
+    x = np.ones(num_nodes) / num_nodes
+    personalization_vector = np.ones(num_nodes) / num_nodes
+
+    print("开始PageRank迭代...")
+
+    # Power Iteration方法
+    for i in range(max_iter):
+        x_new = alpha * P.dot(x) + (1 - alpha) * personalization_vector
+
+        # 检查收敛条件
+        diff = np.linalg.norm(x_new - x, 1)
+
+        if i < 5:  # 打印前几次迭代的差异
+            print(f"迭代 {i + 1}: 差异 = {diff:.10f}")
+
+        if diff < tol:
+            print(f"收敛于第 {i + 1} 次迭代, 最终差异 = {diff:.10f}")
+            x = x_new
+            break
+
+        x = x_new
+    else:
+        print(f"达到最大迭代次数 {max_iter}, 最终差异 = {diff:.10f}")
+
+    return x
+
+
 # 动态计算rwhc和rwiec
 
-def compute_features(incidence_matrix, nu_values=None):
-    if nu_values is None:
-        nu_values = [1.0]
-    features_list = []
-    for nu in nu_values:
-        # 动态调整 RWHC 和 RWIEC 参数
-        theta = 1.0 + 0.5 * (nu - 1.0) ** 1.5  # 非线性调整，nu=1.8 时 theta≈1.45
-        gamma = 0.8 + 0.3 * (nu - 1.0) ** 1.5  # 非线性调整，nu=1.8 时 gamma≈1.08
-        features = [
-            compute_hdc(incidence_matrix),
-            # compute_dc(incidence_matrix),
-            # compute_bc(incidence_matrix),
-            compute_sc(incidence_matrix),
-            RWHCCalculator(incidence_matrix).calculate_rwhc(theta=theta),
-            RWIECalculator(incidence_matrix).calculate_rwiec(gamma=gamma),
-            compute_motif_coefficient(incidence_matrix),
-            compute_overlap_degree(incidence_matrix),
-            # compute_coreness(incidence_matrix),
-            # compute_edge_size_feature(incidence_matrix)
-        ]
-        features_list.append(np.stack(features, axis=1))
+def compute_features(incidence_matrix):
+    # if nu_values is None:
+    #     nu_values = [1.0]
 
-    return features_list[0] if len(nu_values) == 1 else features_list
+    features_list = []
+
+    # theta = 1.0 + 0.5 * (nu - 1.0) ** 1.5
+    # gamma = 0.8 + 0.3 * (nu - 1.0) ** 1.5
+
+    theta = 1.25
+    gamma = 1.0
+
+    # 计算各个特征
+    hdc = compute_hdc(incidence_matrix)
+    # sc = compute_sc(incidence_matrix)
+    rwhc = RWHCCalculator(incidence_matrix).calculate_rwhc(theta=theta)
+    rwiec = RWIECalculator(incidence_matrix).calculate_rwiec(gamma=gamma)
+    motif = compute_motif_coefficient(incidence_matrix)
+    overlap = compute_overlap_degree(incidence_matrix)
+
+    # === 新增：特征标准化和诊断 ===
+    features_raw = [hdc, rwhc, rwiec, motif, overlap]
+    feature_names = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap']
+
+    print("=== 特征值诊断 ===")
+    for i, (feat, name) in enumerate(zip(features_raw, feature_names)):
+        print(f"{name}: min={np.min(feat):.6f}, max={np.max(feat):.6f}, "
+              f"mean={np.mean(feat):.6f}, std={np.std(feat):.6f}")
+        # 前5个节点的原始分数
+        print(f"  Sample scores (first 5 nodes): {feat[:5]}")
+
+    # 鲁棒的标准化方法
+    features_normalized = []
+    for feat in features_raw:
+        if np.std(feat) < 1e-10:  # 常数特征
+            normalized = np.ones_like(feat) * 0.5
+        else:
+            # 先进行对数变换（如果数据有偏）
+            if np.max(feat) > 10 * np.median(feat[feat > 0]):
+                feat_transformed = np.log1p(feat)
+            else:
+                feat_transformed = feat
+            # 最小最大标准化到[0,1]
+            normalized = (feat_transformed - np.min(feat_transformed)) / \
+                          (np.max(feat_transformed) - np.min(feat_transformed) + 1e-10)
+        features_normalized.append(normalized)
+
+    # 组合特征
+    combined_features = np.stack(features_normalized, axis=1)
+
+    # === 新增：显示组合后的效果 ===
+    print("=== 组合特征效果 ===")
+    composite_scores = np.mean(combined_features, axis=1)
+    top_5_indices = np.argsort(composite_scores)[-5:][::-1]  # 从高到低
+    print(f"Top 5节点索引: {top_5_indices}")
+    print("Top 5节点各特征分数:")
+    for idx in top_5_indices:
+        feat_values = combined_features[idx]
+        print(f"  节点{idx}: {', '.join([f'{name}={val:.3f}' for name, val in zip(feature_names, feat_values)])}")
+
+    features_list.append(combined_features)
+
+    return features_list
+
+# def create_seed_set_simulation_labels(incidence_matrix, lambda_val, nu_values, top_k_base=0.05, num_runs=50, n_workers=8):
+#     num_nodes = incidence_matrix.shape[0]
+#     baseline_scores = {
+#         'HDC': compute_hdc(incidence_matrix),
+#         'DC': compute_dc(incidence_matrix),
+#         'BC': compute_bc(incidence_matrix),
+#         'SC': compute_sc(incidence_matrix),
+#         'RWHC': RWHCCalculator(incidence_matrix).calculate_rwhc(),
+#         'RWIEC': RWIECalculator(incidence_matrix).calculate_rwiec()
+#     }
+#     all_seed_sets = []
+#     all_nu_values = []
+#     all_infected_fracs = []
+#     print(f"Generating seed set simulation labels for {len(nu_values)} ν values...")
+#
+#     for nu in nu_values:
+#         print(f"Processing ν={nu:.1f}")
+#         top_k_ratio = max(0.02, top_k_base - 0.03 * (nu - 1.0))
+#         top_k = int(num_nodes * top_k_ratio)
+#         for method_name, scores in baseline_scores.items():
+#             top_nodes = np.argsort(scores)[-top_k:]
+#             all_seed_sets.append(top_nodes)
+#             all_nu_values.append(nu)
+#             infected_frac = compute_infected_fraction(incidence_matrix, top_nodes, lambda_val, nu, mu=1.0, num_runs=num_runs)
+#             all_infected_fracs.append(infected_frac)
+#             print(f"  {method_name}: infected_frac={infected_frac:.4f}")
+#
+#     return all_seed_sets, all_nu_values, all_infected_fracs
+
+
 
 def load_hypergraph(file_path):
     """从txt文件加载"""
@@ -127,6 +257,7 @@ def load_hypergraph_pickle(file_path):
         non_empty = edge_degrees > 0
         incidence_matrix = incidence_matrix[:, non_empty]
         node_degrees = np.sum(incidence_matrix, axis=1).A1  # 更新
+    # 边索引
     adj = incidence_matrix.dot(incidence_matrix.T)
     adj.setdiag(0)
     edge_index = torch.tensor(np.vstack(np.nonzero(adj)), dtype=torch.long)
@@ -210,27 +341,30 @@ def split_dataset(num_nodes, train_ratio=0.7, val_ratio=0.15):
     return train_idx, val_idx, test_idx
 
 
-def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num_candidates=50, num_runs=20):
+def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num_runs=20):
     """
-    根据动态加权公式生成多样化的候选种子集，并模拟得到其真实分数。
+    生成多样化的候选种子集
 
-    Args:
-        num_candidates: 要生成的候选集数量
+    参数:
+        num_candidates: 要生成的候选集数量（其实这个也可以根据数据集大小改变）
         num_runs: 每个候选集的模拟次数
 
-    Returns:
+    返回:
         candidate_sets: 候选集列表 [num_candidates, top_k]
         candidate_scores: 对应的真实分数列表 [num_candidates]
     """
     num_nodes = incidence_matrix.shape[0]
 
+    # 1. 计算特征
     features = {}
     features['HDC'] = compute_hdc(incidence_matrix)
     features['RWHC'] = RWHCCalculator(incidence_matrix).calculate_rwhc()
+    # features['Pagerank'] = compute_pagerank(incidence_matrix)
     features['RWIEC'] = RWIECalculator(incidence_matrix).calculate_rwiec()
     features['Motif'] = compute_motif_coefficient(incidence_matrix)
     features['Overlap'] = compute_overlap_degree(incidence_matrix)
 
+    # 2. 权重初步设定
     if nu < 1.3:
         weights = np.array([0.5, 0.2, 0.1, 0.15, 0.05])  # 偏向HDC和Motif
     elif nu < 1.7:
@@ -238,7 +372,7 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     else:
         weights = np.array([0.2, 0.3, 0.25, 0.15, 0.1])  # 偏向RWHC和RWIEC
 
-    # 计算初始分数并选择Top M节点
+    # 3. 计算初始分数并选择Top M节点
     composite_scores = np.zeros(num_nodes)
     feature_keys = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap']
     for i, key in enumerate(feature_keys):
@@ -252,16 +386,18 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     top_m_indices = np.argsort(composite_scores)[-M:]
     top_k_indices = top_m_indices[-top_k:]  # 纯Top-K集
 
-    # 生成多样化的候选集
+    # 4. 生成多样化的候选集
     candidate_sets = []
 
-    # 确保包含纯Top-K集
+    # 确保包含纯Top-K集 作为第一个
     candidate_sets.append(top_k_indices.copy())
 
+    num_candidates = 50
     # 生成其他候选集
     for i in range(num_candidates - 1):
         if np.random.rand() < 0.5:  # 50%的概率进行随机替换
             candidate_set = top_k_indices.copy()
+            # 随机替换几个节点
             num_replace = np.random.randint(1, 0.3 * top_k) # 可以替换掉最多30%的节点
             for _ in range(num_replace):
                 # 随机选择一个要替换的位置
@@ -272,11 +408,10 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
                     new_node = np.random.choice(available_nodes)
                     candidate_set[replace_idx] = new_node
             candidate_sets.append(candidate_set)
-        else:  # 30%的概率完全随机从Top M中选择
+        else:  # 50%的概率完全随机从Top M中选择
             candidate_set = np.random.choice(top_m_indices, size=top_k, replace=False)
             candidate_sets.append(candidate_set)
 
-    # 为每个候选集模拟得到真实分数
     candidate_scores = []
     print(f"为θ={nu:.1f}模拟{len(candidate_sets)}个候选集...")
 
@@ -293,7 +428,10 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     return candidate_sets, candidate_scores
 
 
-def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_k_ratio=0.04):
+def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_k_ratio):
+    """
+    为多个θ值准备训练数据
+    """
     num_nodes = incidence_matrix.shape[0]
     top_k = int(num_nodes * top_k_ratio)
 
@@ -307,7 +445,7 @@ def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_
 
         candidate_sets, candidate_scores = generate_dynamic_candidate_sets(
             incidence_matrix, nu, top_k, lambda_val,
-            num_candidates=30, num_runs=15
+            num_runs=20
         )
 
         all_candidate_sets.extend(candidate_sets)
@@ -318,6 +456,152 @@ def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_
         best_idx = np.argmax(candidate_scores)
         print(f"  θ={nu:.1f}最佳候选集分数: {candidate_scores[best_idx]:.4f}")
 
-
     return all_candidate_sets, all_nu_values, all_scores
 
+
+def evaluate_infection_dynamics(incidence_matrix, seed_set, lambda_val, nu, num_runs=5):
+    """评估感染动力学特征"""
+    all_curves = []
+    all_times = []
+
+    for run in range(num_runs):
+        initial_infected = np.zeros(incidence_matrix.shape[0])
+        initial_infected[seed_set] = 1
+        contagion = HypergraphContagion(incidence_matrix, initial_infected, lambda_val, nu, mu=1.0)
+
+        # 时间序列数据
+        avg_infected, curve, steps = contagion.simulate(return_curve=True)
+        all_curves.append(curve)
+        all_times.append(steps)
+
+    # 计算各种动力学指标
+    dynamics_metrics = {
+        'final_fraction': np.mean([curve[-1] for curve in all_curves]),
+        'time_to_half': np.mean([steps[np.where(np.array(curve) >= 0.5)[0][0]]
+                                 for curve in all_curves if np.any(np.array(curve) >= 0.5)]),
+        # 'max_growth_rate': np.mean([np.max(np.diff(curve)) for curve in all_curves]),
+        'stabilization_time': np.mean([len(steps) for steps in all_times]),
+        'area_under_curve': np.mean([np.trapz(curve) for curve in all_curves])
+    }
+
+    return dynamics_metrics
+
+
+def evaluate_seed_set_diversity(incidence_matrix, seed_sets):
+    """评估不同方法选择的种子集多样性"""
+    from sklearn.metrics import jaccard_score
+
+    diversity_metrics = {}
+    method_names = list(seed_sets.keys())
+
+    # 计算两两Jaccard相似度
+    similarity_matrix = np.zeros((len(method_names), len(method_names)))
+    for i, method1 in enumerate(method_names):
+        for j, method2 in enumerate(method_names):
+            if i != j:
+                set1 = set(seed_sets[method1])
+                set2 = set(seed_sets[method2])
+                similarity = len(set1 & set2) / len(set1 | set2) if len(set1 | set2) > 0 else 0
+                similarity_matrix[i, j] = similarity
+
+    diversity_metrics['pairwise_similarity'] = similarity_matrix
+    diversity_metrics['average_similarity'] = np.mean(similarity_matrix)
+
+    return diversity_metrics
+
+
+def assess_network_complexity(incidence_matrix):
+    """评估网络复杂度，判断是否值得深度优化"""
+    num_nodes = incidence_matrix.shape[0]
+
+    # 计算特征多样性
+    features = [
+        compute_hdc(incidence_matrix),
+        compute_sc(incidence_matrix),
+        compute_motif_coefficient(incidence_matrix),
+        compute_overlap_degree(incidence_matrix)
+    ]
+
+    # 计算特征间的平均相关系数
+    corr_matrix = np.corrcoef(features)
+    avg_correlation = (np.sum(np.abs(corr_matrix)) - 4) / 12  # 减去对角线，除以组合数
+
+    # 计算节点度的基尼系数
+    degrees = compute_hdc(incidence_matrix)
+    sorted_degrees = np.sort(degrees)
+    n = len(degrees)
+    gini = np.sum((2 * np.arange(1, n + 1) - n - 1) * sorted_degrees) / (n * np.sum(sorted_degrees))
+
+    complexity_score = (1 - avg_correlation) * gini * num_nodes / 100
+
+    print(f"网络复杂度评估:")
+    print(f"  节点数: {num_nodes}")
+    print(f"  特征平均相关系数: {avg_correlation:.3f} (越低越好)")
+    print(f"  度分布基尼系数: {gini:.3f} (越高越不均匀)")
+    print(f"  复杂度分数: {complexity_score:.3f}")
+
+    return complexity_score > 2.0
+
+
+def analyze_critical_nodes_comparison(incidence_matrix, baseline_scores, enhanced_scores, top_k=10):
+    """详细分析关键节点对比"""
+    print("\n" + "=" * 60)
+    print("关键节点对比分析")
+    print("=" * 60)
+
+    # 获取各方法的关键节点
+    enhanced_top = np.argsort(enhanced_scores)[-top_k:][::-1]
+    hdc_top = np.argsort(baseline_scores['HDC'])[-top_k:][::-1]
+    dc_top = np.argsort(baseline_scores['DC'])[-top_k:][::-1]
+    bc_top = np.argsort(baseline_scores['BC'])[-top_k:][::-1]
+    sc_top = np.argsort(baseline_scores['SC'])[-top_k:][::-1]
+
+    # 打印对比
+    methods = {
+        'Enhanced-NuGNN': enhanced_top,
+        'HDC': hdc_top,
+        'DC': dc_top,
+        'BC': bc_top,
+        'SC': sc_top
+    }
+
+    print(f"\n各方法Top{top_k}关键节点:")
+    for method, nodes in methods.items():
+        print(f"{method:15}: {nodes}")
+
+    # 计算重叠度矩阵
+    print(f"\n重叠度矩阵 (Top{top_k}):")
+    method_names = list(methods.keys())
+    overlap_matrix = np.zeros((len(method_names), len(method_names)))
+
+    for i, method1 in enumerate(method_names):
+        for j, method2 in enumerate(method_names):
+            set1 = set(methods[method1])
+            set2 = set(methods[method2])
+            overlap = len(set1 & set2)
+            overlap_matrix[i, j] = overlap
+
+    # 打印重叠矩阵
+    print("     " + "".join([f"{name:>15}" for name in method_names]))
+    for i, name in enumerate(method_names):
+        row = f"{name:15}"
+        for j in range(len(method_names)):
+            row += f"{overlap_matrix[i, j]:>15}"
+        print(row)
+
+    # 分析Enhanced-NuGNN的独特点
+    enhanced_set = set(enhanced_top)
+    other_sets = [set(methods[name]) for name in method_names if name != 'Enhanced-NuGNN']
+    unique_to_enhanced = enhanced_set - set().union(*other_sets)
+
+    if unique_to_enhanced:
+        print(f"\nEnhanced-NuGNN独有的关键节点: {sorted(unique_to_enhanced)}")
+        # 分析这些独有节点的特性
+        node_degrees = compute_hdc(incidence_matrix)
+        unique_degrees = node_degrees[list(unique_to_enhanced)]
+        print(
+            f"这些节点的度分布: 最小={np.min(unique_degrees)}, 最大={np.max(unique_degrees)}, 平均={np.mean(unique_degrees):.2f}")
+    else:
+        print(f"\nEnhanced-NuGNN没有独有关键节点")
+
+    return methods
