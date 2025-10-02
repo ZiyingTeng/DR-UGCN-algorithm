@@ -190,36 +190,6 @@ def compute_features(incidence_matrix):
 
     return features_list
 
-# def create_seed_set_simulation_labels(incidence_matrix, lambda_val, nu_values, top_k_base=0.05, num_runs=50, n_workers=8):
-#     num_nodes = incidence_matrix.shape[0]
-#     baseline_scores = {
-#         'HDC': compute_hdc(incidence_matrix),
-#         'DC': compute_dc(incidence_matrix),
-#         'BC': compute_bc(incidence_matrix),
-#         'SC': compute_sc(incidence_matrix),
-#         'RWHC': RWHCCalculator(incidence_matrix).calculate_rwhc(),
-#         'RWIEC': RWIECalculator(incidence_matrix).calculate_rwiec()
-#     }
-#     all_seed_sets = []
-#     all_nu_values = []
-#     all_infected_fracs = []
-#     print(f"Generating seed set simulation labels for {len(nu_values)} ν values...")
-#
-#     for nu in nu_values:
-#         print(f"Processing ν={nu:.1f}")
-#         top_k_ratio = max(0.02, top_k_base - 0.03 * (nu - 1.0))
-#         top_k = int(num_nodes * top_k_ratio)
-#         for method_name, scores in baseline_scores.items():
-#             top_nodes = np.argsort(scores)[-top_k:]
-#             all_seed_sets.append(top_nodes)
-#             all_nu_values.append(nu)
-#             infected_frac = compute_infected_fraction(incidence_matrix, top_nodes, lambda_val, nu, mu=1.0, num_runs=num_runs)
-#             all_infected_fracs.append(infected_frac)
-#             print(f"  {method_name}: infected_frac={infected_frac:.4f}")
-#
-#     return all_seed_sets, all_nu_values, all_infected_fracs
-
-
 
 def load_hypergraph(file_path):
     """从txt文件加载"""

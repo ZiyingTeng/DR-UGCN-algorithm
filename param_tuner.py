@@ -24,23 +24,21 @@ def compute_infection_loss_2(model, data, incidence_matrix, nu, lambda_val=0.1, 
         initial_infected = np.zeros(num_nodes)
         initial_infected[seed_nodes] = 1
         contagion = HypergraphContagion(incidence_matrix, initial_infected, lambda_val, nu)
-        simulated_fraction, _, _ = contagion.simulate(return_curve=True)  # 用均值作为分数
+        simulated_fraction, _, _ = contagion.simulate(return_curve=True)
         target_fraction = np.mean(simulated_fraction[-100:]) if len(simulated_fraction) > 100 else np.mean(simulated_fraction)
-        return torch.tensor(1 - target_fraction)  # 损失：1 - 平均感染比例（鼓励更大感染）
+        return torch.tensor(1 - target_fraction)
 
 def compute_infection_loss(model, data, incidence_matrix, nu, lambda_val=0.1, top_k_ratio=0.05):
-    """计算感染损失，保留梯度信息"""
-    model.train()  # 改为train模式以保留梯度
-    # 移除torch.no_grad()，保留计算图
-
+    """计算感染损失"""
+    model.train()  # 保留梯度
     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1, 1)
     main_scores, _ = model(data, nu, node_degrees)
-    scores = main_scores.cpu().detach().numpy().flatten()  # 只在最后一步detach
+    scores = main_scores.cpu().detach().numpy().flatten()
     num_nodes = incidence_matrix.shape[0]
     top_k = int(num_nodes * top_k_ratio)
     seed_nodes = np.argsort(scores)[-top_k:]
 
-    # 感染模拟（这部分不需要梯度）
+    # 感染模拟
     with torch.no_grad():
         infected_frac = compute_infected_fraction(
             incidence_matrix, seed_nodes, lambda_val, nu, num_runs=3
@@ -57,24 +55,16 @@ def compute_proxy_infection_loss(model, data, incidence_matrix, nu):
     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1, 1)
     main_scores, _ = model(data, nu, node_degrees)
 
-    # 使用你实际可用的特征
     hdc = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=main_scores.device)
     rwhc = torch.tensor(RWHCCalculator(incidence_matrix).calculate_rwhc(), dtype=torch.float, device=main_scores.device)
     pagerank = torch.tensor(compute_pagerank(incidence_matrix), dtype=torch.float, device=main_scores.device)
 
-    # ν自适应的特征组合
     if nu < 1.5:
-        # 低ν（易传播）：重视局部特征和直接连接
-        # 简单的传播更依赖节点的直接影响力
         proxy_target = 0.4 * hdc + 0.3 * rwhc + 0.3 * pagerank
     else:
-        # 高ν（难传播）：重视全局特征和间接影响力
-        # 困难的传播需要借助网络的长程连接
         proxy_target = 0.3 * hdc + 0.3 * rwhc + 0.4 * pagerank
 
-    # 归一化
     proxy_target = (proxy_target - proxy_target.min()) / (proxy_target.max() - proxy_target.min() + 1e-10)
-
     loss = F.mse_loss(main_scores.squeeze(), proxy_target)
     return loss
 
@@ -101,20 +91,19 @@ def compute_connectivity_loss_2(model, data, incidence_matrix, nu, top_k_ratio=0
             connectivity_after = hypergraph_natural_connectivity(modified_matrix)
         connectivity_original = hypergraph_natural_connectivity(incidence_matrix)
         drop = (connectivity_original - connectivity_after) / (connectivity_original + 1e-10)
-        return -alpha * torch.log(torch.tensor(drop + 1e-10))  # 鼓励更大下降
+        return -alpha * torch.log(torch.tensor(drop + 1e-10))
 
 def compute_connectivity_loss(model, data, incidence_matrix, nu, top_k_ratio=0.05, alpha=0.3):
     """计算连通性损失，保留梯度信息"""
-    model.train()  # 改为train模式
+    model.train()
 
     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1, 1)
     main_scores, _ = model(data, nu, node_degrees)
-    scores = main_scores.cpu().detach().numpy().flatten()  # 只在最后一步detach
+    scores = main_scores.cpu().detach().numpy().flatten()
     num_nodes = incidence_matrix.shape[0]
     top_k = int(num_nodes * top_k_ratio)
     sorted_nodes = np.argsort(scores)[-top_k:]
 
-    # 连通性计算（这部分不需要梯度）
     with torch.no_grad():
         nodes_to_keep = np.setdiff1d(np.arange(num_nodes), sorted_nodes)
         if len(nodes_to_keep) == 0:
@@ -130,7 +119,6 @@ def compute_connectivity_loss(model, data, incidence_matrix, nu, top_k_ratio=0.0
         else:
             connectivity_after = hypergraph_natural_connectivity(modified_matrix)
 
-            # 添加数值稳定性检查
             connectivity_original = hypergraph_natural_connectivity(incidence_matrix)
             if len(nodes_to_keep) == 0:
                 return torch.tensor(0.0)
@@ -140,7 +128,6 @@ def compute_connectivity_loss(model, data, incidence_matrix, nu, top_k_ratio=0.0
             non_zero_edges = edge_sums > 0
             modified_matrix = modified_matrix[:, non_zero_edges]
 
-            # 检查修改后的矩阵是否有效
             if modified_matrix.shape[0] < 2 or modified_matrix.shape[1] == 0:
                 return torch.tensor(0.0)  # 无法计算连通性
 
@@ -152,7 +139,7 @@ def compute_connectivity_loss(model, data, incidence_matrix, nu, top_k_ratio=0.0
 
             # 确保下降值合理
             drop = (connectivity_original - connectivity_after) / (connectivity_original + 1e-10)
-            drop = np.clip(drop, 0.0, 1.0)  # 限制在合理范围内
+            drop = np.clip(drop, 0.0, 1.0)
 
             return -alpha * torch.log(torch.tensor(drop + 1e-10))
 
@@ -163,7 +150,7 @@ def compute_proxy_connectivity_loss(model, data, incidence_matrix, nu):
     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1, 1)
     main_scores, _ = model(data, nu, node_degrees)
 
-    # 连通性破坏：选择对网络结构影响大的节点
+    # 选择对网络结构影响大的节点
     rwiec = torch.tensor(RWIECalculator(incidence_matrix).calculate_rwiec(), dtype=torch.float,
                          device=main_scores.device)
     overlap = torch.tensor(compute_overlap_degree(incidence_matrix), dtype=torch.float, device=main_scores.device)
@@ -172,7 +159,7 @@ def compute_proxy_connectivity_loss(model, data, incidence_matrix, nu):
     # 连通性重要性组合：
     # - RWIEC: 信息熵高表示结构关键位置
     # - Overlap: 重叠度高表示桥梁作用强
-    # - Motif: 模体参与度高表示局部结构重要
+    # - Motif: motif参与度高表示局部结构重要
     connectivity_importance = 0.4 * rwiec + 0.4 * overlap + 0.2 * motif
 
     # 归一化
@@ -210,7 +197,6 @@ class HyperparameterTuner:
             params['hidden_channels'] = trial.suggest_categorical('hidden_channels_large', [256, 512])
 
         try:
-            # 创建模型
             model = EnhancedNuAwareModel(
                 in_channels=self.data.x.shape[1],
                 hidden_channels=params['hidden_channels'],
@@ -232,7 +218,7 @@ class HyperparameterTuner:
             return -float('inf')
 
     def quick_validate(self, model, params):
-        """快速验证方法，修复梯度问题"""
+        """快速验证方法"""
         device = next(model.parameters()).device
         model.to(device)
         self.data = self.data.to(device)
@@ -240,8 +226,7 @@ class HyperparameterTuner:
         optimizer = Adam(model.parameters(), lr=params['lr'], weight_decay=1e-4)
 
         try:
-            # 只进行少量迭代的快速训练
-            for epoch in range(20):  # 减少迭代次数
+            for epoch in range(20):
                 model.train()
                 optimizer.zero_grad()
 
@@ -250,7 +235,6 @@ class HyperparameterTuner:
                 # 前向传播
                 scores, _ = model(self.data, nu, node_degrees=None)
 
-                # 计算损失
                 infection_loss = compute_infection_loss(model, self.data, self.incidence_matrix, nu,
                                                         top_k_ratio=params['top_k_ratio'])
                 connect_loss = compute_connectivity_loss(model, self.data, self.incidence_matrix, nu,
@@ -270,14 +254,13 @@ class HyperparameterTuner:
             # 快速评估
             model.eval()
             total_score = 0
-            eval_nu_values = self.nu_values[:3]  # 只评估前3个nu值加速
+            eval_nu_values = self.nu_values[:3]
 
             for nu in eval_nu_values:
                 with torch.no_grad():
                     scores, _ = model(self.data, nu, node_degrees=None)
                     scores_np = scores.cpu().numpy().flatten()
 
-                    # 简单的评估指标：选择top-k节点的平均分数
                     top_k = int(len(scores_np) * params['top_k_ratio'])
                     top_scores = np.sort(scores_np)[-top_k:]
                     avg_top_score = np.mean(top_scores)

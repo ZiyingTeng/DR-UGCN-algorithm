@@ -8,7 +8,7 @@ from unigencoder import Unigencoder
 
 
 class UniGCNRegression(nn.Module):
-    def __init__(self, in_channels, hidden_channels=64, out_channels=1, num_layers=2, dropout=0.3):  # 默认hidden_channels=64, num_layers=2
+    def __init__(self, in_channels, hidden_channels=64, out_channels=1, num_layers=2, dropout=0.3):
         super().__init__()
         self.dropout = dropout
         self.unig_encoder = Unigencoder(
@@ -77,7 +77,7 @@ class UniGCNRegression(nn.Module):
                         # 如果维度不匹配，使用线性投影
                         skip_projection = nn.Linear(skip_source.shape[-1], x.shape[-1]).to(x.device)
                         skip_source = skip_projection(skip_source)
-                    x = x + skip_source  # 残差连接
+                    x = x + skip_source
 
             previous_outputs.append(x.clone())
 
