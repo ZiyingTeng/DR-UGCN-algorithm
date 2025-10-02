@@ -1,9 +1,10 @@
 # Enhangced-NuGNN-algorithm
 Enhangced-NuGNN Critical Nodes Identification Algorithm In Hypergraph
 
-在初始特征值输入阶段，提出了两个基于随机游走的特征值中心性：信息熵中心性和热力值中心性，用于捕捉动态特性，结合静态特征，给模型一个初步认知
-但由于超图结构的复杂性、非线性以及其深层特性与连接性质的难以解释性，我们很难用线性、扁平的方式去描述或定义它的复杂特征，因而引发两个难题：
-1.对于超图特性的捕捉
-2.对于超图中那样的节点更能够被称作关键节点的定义
-算法主要基于黑箱的思路，结合特征标签与实际模拟带来的外部验证，让模型自发地去学习那些复杂的联系，以获得比通过固定标准识别出的节点排序更为有说服力的排序
-然后通过不同角度和标准去验证和说明
+During the initial eigenvalue input phase, two random walk-based eigenvalue centrality measures—information entropy centrality and thermal centrality—were introduced to capture dynamic characteristics and integrate with static features, thereby providing the model with foundational insights.
+However, owing to the inherent complexity, nonlinearity, and the challenges in interpreting the deep structural characteristics and connectivity properties of hypergraph structures, it becomes inherently difficult to delineate or define their intricate features through linear and simplistic approaches.
+This consequently presents two significant challenges: 
+1) the effective capture of hypergraph characteristics;
+2) the precise identification of nodes within the hypergraph that can be more accurately designated as key nodes.
+The algorithm predominantly adopts a black-box methodology, amalgamating feature labels with external validation derived from empirical simulations, thereby enabling the model to autonomously learn these complex interconnections to achieve a more robust ranking compared to those obtained through conventional fixed criteria.
+Subsequently, the results are rigorously validated and interpreted from multiple perspectives and standards.
