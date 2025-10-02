@@ -8,10 +8,9 @@ from unigencoder import Unigencoder
 
 
 class UniGCNRegression(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=3, dropout=0.3):
+    def __init__(self, in_channels, hidden_channels=64, out_channels=1, num_layers=2, dropout=0.3):  # 默认hidden_channels=64, num_layers=2
         super().__init__()
         self.dropout = dropout
-
         self.unig_encoder = Unigencoder(
             in_channels=in_channels,
             hidden_channels=hidden_channels,
@@ -21,23 +20,14 @@ class UniGCNRegression(nn.Module):
             Normalization='bn',
             InputNorm=True
         )
-        # 动态计算第一层输入维度
         first_layer_input = in_channels + hidden_channels
-
-        # GCN层
         self.gcn_layers = nn.ModuleList()
         self.norms = nn.ModuleList()
-
-        # 第一层
         self.gcn_layers.append(GCNConv(first_layer_input, hidden_channels))
         self.norms.append(nn.LayerNorm(hidden_channels))
-
-        # 中间层
         for i in range(1, num_layers - 1):
             self.gcn_layers.append(GCNConv(hidden_channels, hidden_channels))
             self.norms.append(nn.LayerNorm(hidden_channels))
-
-        # 最后一层
         self.gcn_layers.append(GCNConv(hidden_channels, hidden_channels))
         self.norms.append(nn.LayerNorm(hidden_channels))
 

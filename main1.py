@@ -4,9 +4,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.sparse import csr_matrix
+from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data
 from UniGGCN import UniGCNRegression
 from new_aware_model import NuAwareUniGCN, NuAwareUniGCNWithFiLM, EnhancedNuAwareModel
+from nonlinear import HypergraphContagion
 from rwhc import RWHCCalculator
 from rwiec import RWIECalculator
 from utils import load_hypergraph, compute_features, split_dataset, compute_infected_fraction, cache_baseline_scores, \
@@ -21,7 +23,9 @@ import os
 import random
 from unigencoder import Unigencoder
 import torch.nn.functional as F
-
+from param_tuner import HyperparameterTuner
+from connectivity import hypergraph_natural_connectivity
+import torch
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -31,6 +35,48 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
         torch.backends.cudnn.deterministic = True
 
+
+def compute_infection_loss(model, data, incidence_matrix, nu, lambda_val=0.1, top_k_ratio=0.05):
+    model.eval()
+    with torch.no_grad():
+        node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1, 1)
+        main_scores, _ = model(data, nu, node_degrees)
+        scores = main_scores.cpu().numpy().flatten()
+        num_nodes = incidence_matrix.shape[0]
+        top_k = int(num_nodes * top_k_ratio)
+        seed_nodes = np.argsort(scores)[-top_k:]
+
+        # 修复：确保simulate返回数组
+        infected_frac = compute_infected_fraction(
+            incidence_matrix, seed_nodes, lambda_val, nu, num_runs=3  # 减少模拟次数加速
+        )
+
+        # 直接使用返回值，不尝试切片
+        return torch.tensor(1 - infected_frac)  # 损失：1 - 感染比例
+
+def compute_connectivity_loss(model, data, incidence_matrix, nu, top_k_ratio=0.05, alpha=0.3):
+    model.eval()
+    with torch.no_grad():
+        node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1, 1)
+        main_scores, _ = model(data, nu, node_degrees)
+        scores = main_scores.cpu().numpy().flatten()
+        num_nodes = incidence_matrix.shape[0]
+        top_k = int(num_nodes * top_k_ratio)
+        sorted_nodes = np.argsort(scores)[-top_k:]  # 高分节点
+        nodes_to_keep = np.setdiff1d(np.arange(num_nodes), sorted_nodes)
+        if len(nodes_to_keep) == 0:
+            return torch.tensor(0.0)  # 避免除零
+        modified_matrix = incidence_matrix[nodes_to_keep, :]
+        edge_sums = np.array(modified_matrix.sum(axis=0)).flatten()
+        non_zero_edges = edge_sums > 0
+        modified_matrix = modified_matrix[:, non_zero_edges]
+        if modified_matrix.shape[1] == 0:
+            connectivity_after = -np.inf
+        else:
+            connectivity_after = hypergraph_natural_connectivity(modified_matrix)
+        connectivity_original = hypergraph_natural_connectivity(incidence_matrix)
+        drop = (connectivity_original - connectivity_after) / (connectivity_original + 1e-10)
+        return -alpha * torch.log(torch.tensor(drop + 1e-10))  # 鼓励更大下降
 
 def evaluate_connectivity_after_removal(incidence_matrix, node_scores, algorithm_name, removal_ratios):
     """
@@ -156,95 +202,211 @@ def compare_connectivity_across_algorithms(incidence_matrix, baseline_scores, en
 
     return results
 
-
-def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, lr=0.001, patience=50):
-    # 评估网络复杂度
-    complexity = assess_network_complexity(incidence_matrix)
-
-    # 动态调整训练策略
-    if complexity < 2.0:  # 简单网络
-        actual_epochs = min(epochs, 150)
-        actual_lr = lr * 1.5
-    else:  # 复杂网络
-        actual_epochs = epochs
-        actual_lr = lr
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+def train_enhanced_model(model, data, original_incidence_matrix, train_idx, epochs=300, lr=0.0005, patience=50):
+    device = data.x.device
     model.to(device)
 
-    # 准备节点度特征
-    node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=actual_lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=15, factor=0.5)
-
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-4)
     best_loss = float('inf')
     patience_counter = 0
+    # # 假设从 split_dataset 获取 train/val 分割
+    # train_idx, val_idx = train_test_split(range(data.x.shape[0]), test_size=0.2, random_state=42)
+    # 简单的学习率调度
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
 
-    for epoch in range(actual_epochs):
+    torch.autograd.set_detect_anomaly(True)   # 帮助检测梯度问题
+    for epoch in range(epochs):
+        # 训练阶段
         model.train()
-        total_loss = 0
-        total_main_loss = 0
-        total_aux_loss = 0
+        optimizer.zero_grad()
 
-        # 随机打乱训练样本
-        indices = torch.randperm(len(data.seed_sets))
+        nu = np.random.choice(nu_vals)
+        node_degrees = torch.tensor(compute_hdc(original_incidence_matrix), dtype=torch.float, device=device).view(-1,
+                                                                                                                   1)
+        main_scores, linear_scores = model(data, nu, node_degrees)
 
-        for idx in indices:
-            seed_set = data.seed_sets[idx]
-            nu_val = data.seed_set_nu[idx]
-            true_score = data.seed_set_labels[idx]
-
-            optimizer.zero_grad()
-
-            # 前向传播
-            main_scores, linear_scores = model(data, nu_val, node_degrees)
-
-            # 计算主损失：种子集总分 vs 真实分数
-            seed_set_scores = main_scores[seed_set]
-            predicted_score = torch.sum(seed_set_scores)
-            loss_main = F.mse_loss(predicted_score, true_score)
-
-            # 计算辅助损失：鼓励主分数与线性分数分布相似
-            loss_aux = F.mse_loss(main_scores, linear_scores.detach())
-
-            # 组合损失
-            alpha = 0.1  # 辅助损失权重
-            loss = loss_main + alpha * loss_aux
-
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            total_loss += loss.item()
-            total_main_loss += loss_main.item()
-            total_aux_loss += loss_aux.item()
-
-        # 验证和早停
-        avg_loss = total_loss / len(indices)
-        avg_main_loss = total_main_loss / len(indices)
-        avg_aux_loss = total_aux_loss / len(indices)
-
-        if epoch % 20 == 0:
-            print(
-                f'Epoch {epoch:3d} | Loss: {avg_loss:.4f} (Main: {avg_main_loss:.4f}, Aux: {avg_aux_loss:.4f}) | LR: {optimizer.param_groups[0]["lr"]:.6f}')
-
-        # 早停
-        if avg_loss < best_loss:
-            best_loss = avg_loss
-            patience_counter = 0
-            torch.save(model.state_dict(), 'best_enhanced_model.pth')
+        # 计算损失
+        infection_loss = compute_infection_loss(model, data, original_incidence_matrix, nu)
+        if epoch % 5 == 0:  # 每5个epoch计算一次连通性损失
+            connect_loss = compute_connectivity_loss(model, data, original_incidence_matrix, nu)
         else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch}")
-                break
+            connect_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        # aux_loss = torch.mean((main_scores - linear_scores) ** 2)
+        # loss = 0.5 * infection_loss + 0.3 * connect_loss + 0.2 * aux_loss
 
-        scheduler.step(avg_loss)
+        # 阶段1 (0-100轮): 主要学习传播特性
+        if epoch < 100:
+            infection_loss = compute_infection_loss(model, data, original_incidence_matrix, nu)
+            loss = infection_loss  # 只关注传播
 
-    # 加载最佳模型
-    model.load_state_dict(torch.load('best_enhanced_model.pth', map_location=device))
+        # 阶段2 (100-200轮): 逐步引入连通性考虑
+        elif epoch < 200:
+            infection_loss = compute_infection_loss(model, data, original_incidence_matrix, nu)
+            connect_loss = compute_connectivity_loss(model, data, original_incidence_matrix, nu)
+            # 渐进式增加连通性权重
+            connect_weight = min(0.3 * (epoch - 100) / 100, 0.3)
+            loss = (1 - connect_weight) * infection_loss + connect_weight * connect_loss
+
+        # 阶段3 (200轮后): 平衡优化
+        else:
+            infection_loss = compute_infection_loss(model, data, original_incidence_matrix, nu)
+            connect_loss = compute_connectivity_loss(model, data, original_incidence_matrix, nu)
+            loss = 0.7 * infection_loss + 0.3 * connect_loss  # 侧重传播，兼顾结构
+
+        # 检查损失有效性
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"Epoch {epoch}: 无效损失值，跳过")
+            continue
+
+        # 确保损失可导
+        if not loss.requires_grad:
+            loss = loss.clone().requires_grad_(True)
+
+        loss.backward()
+
+        # 梯度检查
+        total_norm = 0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** (1. / 2)
+
+        # 如果梯度太大，进行裁剪
+        max_grad_norm = 1.0
+        if total_norm > max_grad_norm:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            print(f"Epoch {epoch}: 梯度裁剪 applied, norm was {total_norm:.4f}")
+
+        optimizer.step()
+
+        # 检查损失是否合理
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"Epoch {epoch}: 损失异常 {loss.item()}, 跳过更新")
+            optimizer.zero_grad()
+            continue
+
+        # 验证阶段
+        if epoch % 10 == 0:
+            model.eval()
+            with torch.no_grad():
+                val_loss = 0
+                for val_nu in nu_vals[:2]:  # 验证前2个θ值
+                    val_main_scores, _ = model(data, val_nu, node_degrees)
+                    # 简单的验证损失：节点分数的方差（鼓励分数有区分度）
+                    score_variance = torch.var(val_main_scores)
+                    val_loss += -score_variance.item()  # 负号因为我们要最大化方差
+
+                val_loss /= 2
+
+                if val_loss < best_loss:
+                    best_loss = val_loss
+                    patience_counter = 0
+                    torch.save(model.state_dict(), 'best_model.pth')
+                else:
+                    patience_counter += 1
+
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch}")
+                    break
+
+        if epoch % 50 == 0:
+            print(f'Epoch {epoch}, Loss: {loss.item():.4f}')
+
+        # 加载最佳模型
+    if os.path.exists('best_model.pth'):
+        model.load_state_dict(torch.load('best_model.pth'))
+
     return model
+
+# def train_enhanced_model(model, data, incidence_matrix, train_idx, epochs=300, lr=0.001, patience=50):
+#     # 评估网络复杂度
+#     complexity = assess_network_complexity(incidence_matrix)
+#
+#     # 动态调整训练策略
+#     if complexity < 2.0:  # 简单网络
+#         actual_epochs = min(epochs, 150)
+#         actual_lr = lr * 1.5
+#     else:  # 复杂网络
+#         actual_epochs = epochs
+#         actual_lr = lr
+#
+#     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+#     model.to(device)
+#
+#     # 准备节点度特征
+#     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
+#
+#     optimizer = torch.optim.Adam(model.parameters(), lr=actual_lr, weight_decay=1e-4)
+#     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=15, factor=0.5)
+#
+#     best_loss = float('inf')
+#     patience_counter = 0
+#
+#     for epoch in range(actual_epochs):
+#         model.train()
+#         total_loss = 0
+#         total_main_loss = 0
+#         total_aux_loss = 0
+#
+#         # 随机打乱训练样本
+#         indices = torch.randperm(len(data.seed_sets))
+#
+#         for idx in indices:
+#             seed_set = data.seed_sets[idx]
+#             nu_val = data.seed_set_nu[idx]
+#             true_score = data.seed_set_labels[idx]
+#
+#             optimizer.zero_grad()
+#
+#             # 前向传播
+#             main_scores, linear_scores = model(data, nu_val, node_degrees)
+#
+#             # 计算主损失：种子集总分 vs 真实分数
+#             seed_set_scores = main_scores[seed_set]
+#             predicted_score = torch.sum(seed_set_scores)
+#             loss_main = F.mse_loss(predicted_score, true_score)
+#
+#             # 计算辅助损失：鼓励主分数与线性分数分布相似
+#             loss_aux = F.mse_loss(main_scores, linear_scores.detach())
+#
+#             # 组合损失
+#             alpha = 0.1  # 辅助损失权重
+#             loss = loss_main + alpha * loss_aux
+#
+#             loss.backward()
+#             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+#             optimizer.step()
+#
+#             total_loss += loss.item()
+#             total_main_loss += loss_main.item()
+#             total_aux_loss += loss_aux.item()
+#
+#         # 验证和早停
+#         avg_loss = total_loss / len(indices)
+#         avg_main_loss = total_main_loss / len(indices)
+#         avg_aux_loss = total_aux_loss / len(indices)
+#
+#         if epoch % 20 == 0:
+#             print(
+#                 f'Epoch {epoch:3d} | Loss: {avg_loss:.4f} (Main: {avg_main_loss:.4f}, Aux: {avg_aux_loss:.4f}) | LR: {optimizer.param_groups[0]["lr"]:.6f}')
+#
+#         # 早停
+#         if avg_loss < best_loss:
+#             best_loss = avg_loss
+#             patience_counter = 0
+#             torch.save(model.state_dict(), 'best_enhanced_model.pth')
+#         else:
+#             patience_counter += 1
+#             if patience_counter >= patience:
+#                 print(f"Early stopping at epoch {epoch}")
+#                 break
+#
+#         scheduler.step(avg_loss)
+#
+#     # 加载最佳模型
+#     model.load_state_dict(torch.load('best_enhanced_model.pth', map_location=device))
+#     return model
 
 
 def analyze_auxiliary_weights(model, data, nu_values, incidence_matrix):
@@ -253,7 +415,7 @@ def analyze_auxiliary_weights(model, data, nu_values, incidence_matrix):
     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
 
     print("辅助网络学到的特征权重随nu的变化:")
-    feature_names = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap']
+    feature_names = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap', 'Pagerank']
 
     for nu in nu_values:
         with torch.no_grad():
@@ -488,7 +650,16 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
             print(f"Enhanced-NuGNN Top{top_k}节点索引: {top_enhanced_indices}")
             print(f"Enhanced-NuGNN Top{top_k}节点分数: {enhanced_scores[top_enhanced_indices]}")
 
-        # 评估基线方法
+            # === 修复：评估Enhanced-NuGNN的性能并添加到results中 ===
+            enhanced_dynamics = evaluate_infection_dynamics(
+                incidence_matrix, enhanced_nodes, lambda_val, nu, num_runs=num_runs
+            )
+            results[nu]['Enhanced-NuGNN'] = {
+                'final_fraction': enhanced_dynamics['final_fraction'],
+                'dynamics': enhanced_dynamics
+            }
+
+            # 评估基线方法
         try:
             baseline_scores = cache_baseline_scores(incidence_matrix)
 
@@ -497,7 +668,6 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
                 top_nodes = np.argsort(scores)[-top_k:][::-1]  # 从高到低排序
                 nu_seed_sets[method] = top_nodes
 
-                # === 新增：打印每个基线方法的关键节点和分数 ===
                 print(f"\n{method}方法:")
                 print(f"Top{top_k}节点索引: {top_nodes}")
                 print(f"Top{top_k}节点分数: {scores[top_nodes]}")
@@ -516,10 +686,17 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
 
         except KeyError as e:
             print(f"KeyError in baseline scores: {e}")
+        except Exception as e:
+            print(f"Error evaluating baseline method: {e}")
 
-        # 评估种子集多样性
-        diversity_metrics = evaluate_seed_set_diversity(incidence_matrix, nu_seed_sets)
-        results[nu]['diversity'] = diversity_metrics
+            # 评估种子集多样性
+        try:
+            diversity_metrics = evaluate_seed_set_diversity(incidence_matrix, nu_seed_sets)
+            results[nu]['diversity'] = diversity_metrics
+        except Exception as e:
+            print(f"Error evaluating diversity: {e}")
+            results[nu]['diversity'] = {}
+
         all_seed_sets[nu] = nu_seed_sets
 
         # === 新增：打印方法间重叠度对比 ===
@@ -532,7 +709,11 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
                 jaccard = overlap / len(enhanced_set | method_set) if len(enhanced_set | method_set) > 0 else 0
                 print(f"Enhanced-NuGNN vs {method}: 重叠{overlap}个节点, Jaccard相似度={jaccard:.3f}")
 
-        print(f"nu={nu:.1f}: Enhanced-NuGNN: {results[nu]['Enhanced-NuGNN']['final_fraction']:.4f}")
+        # === 修复：确保Enhanced-NuGNN的结果存在再打印 ===
+        if 'Enhanced-NuGNN' in results[nu]:
+            print(f"ν={nu:.1f}: Enhanced-NuGNN: {results[nu]['Enhanced-NuGNN']['final_fraction']:.4f}")
+        else:
+            print(f"ν={nu:.1f}: Enhanced-NuGNN结果缺失")
 
     return results, all_seed_sets
 
@@ -572,7 +753,7 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
         fractions = [results[nu][method]['final_fraction'] for nu in nu_vals]
         ax1.plot(nu_vals, fractions, label=method, color=colors.get(method, 'black'), marker='o', linewidth=2)
-    ax1.set_xlabel('ν')
+    ax1.set_xlabel('θ')
     ax1.set_ylabel('Final Infection Fraction')
     ax1.set_title('Senate')
     ax1.legend()
@@ -582,7 +763,7 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
         times = [results[nu][method]['dynamics']['time_to_half'] for nu in nu_vals]
         ax2.plot(nu_vals, times, label=method, color=colors.get(method, 'black'), marker='s', linewidth=2)
-    ax2.set_xlabel('ν')
+    ax2.set_xlabel('θ')
     ax2.set_ylabel('Time to 50% Infection')
     ax2.set_title('Senate')
     ax2.legend()
@@ -617,7 +798,7 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     # ax4.grid(True)
 
     plt.tight_layout()
-    plt.savefig('senate2.png', dpi=300, bbox_inches='tight')
+    plt.savefig('senate2-.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 
@@ -669,11 +850,11 @@ if __name__ == "__main__":
 
     # 计算初版增强算法分数（基于五个特征的组合）
     scores_hdc = compute_hdc(connectivity_matrix)
-    # scores_pagerank = compute_pagerank(incidence_matrix)
     scores_rwhc = RWHCCalculator(connectivity_matrix).calculate_rwhc()
     scores_rwiec = RWIECalculator(connectivity_matrix).calculate_rwiec()
     scores_motif = compute_motif_coefficient(connectivity_matrix)
     scores_overlap = compute_overlap_degree(connectivity_matrix)
+    scores_pagerank = compute_pagerank(incidence_matrix)
 
 
     # 归一化特征
@@ -682,14 +863,14 @@ if __name__ == "__main__":
 
 
     normalized_hdc = normalize_scores(scores_hdc)
-    # normalized_pagerank = normalize_scores(scores_pagerank)
     normalized_rwhc = normalize_scores(scores_rwhc)
     normalized_rwiec = normalize_scores(scores_rwiec)
     normalized_motif = normalize_scores(scores_motif)
     normalized_overlap = normalize_scores(scores_overlap)
+    normalized_pagerank = normalize_scores(scores_pagerank)
 
     # 初始组合分数（平均权重）
-    initial_enhanced_scores = (normalized_hdc + normalized_rwhc + normalized_rwiec + normalized_motif + normalized_overlap) / 5
+    initial_enhanced_scores = (normalized_hdc + normalized_rwhc + normalized_rwiec + normalized_motif + normalized_overlap + normalized_pagerank) / 6
 
     # 定义要删除的比例
     removal_ratios = np.arange(0.1, 1.1, 0.1)
@@ -698,11 +879,13 @@ if __name__ == "__main__":
     initial_connectivity_results = compare_connectivity_across_algorithms(
         connectivity_matrix, baseline_scores, initial_enhanced_scores, removal_ratios, "Initial"
     )
-    # === 新增：训练前的关键节点对比 ===
+    # === 训练前的关键节点对比 ===
     print("\n=== 训练前关键节点对比 ===")
     initial_methods = analyze_critical_nodes_comparison(
         original_incidence_matrix, baseline_scores, initial_enhanced_scores, top_k=15
     )
+
+
 
     # === 后续实验步骤使用原始矩阵 ===
     print("=== 生成训练数据 ===")
@@ -740,31 +923,53 @@ if __name__ == "__main__":
     data.seed_set_labels = torch.tensor(all_infected_fracs, dtype=torch.float, device=device)
     print(f"生成了 {len(all_seed_sets)} 个高质量训练样本")
 
-    complexity_adequate = assess_network_complexity(original_incidence_matrix)
-    if not complexity_adequate:
-        print("网络复杂度较低，建议使用标准模型")
-        # 使用简化版模型
-        model = EnhancedNuAwareModel(
-            in_channels=features.shape[1],
-            hidden_channels=128,
-            out_channels=1,
-            num_raw_features=5,
-            num_heads=3
-        )
-    else:
-        print("网络复杂度足够，使用增强模型")
-        model = EnhancedNuAwareModel(
-            in_channels=features.shape[1],
-            hidden_channels=256,
-            out_channels=1,
-            num_raw_features=5,
-            num_heads=4
-        )
+    # complexity_adequate = assess_network_complexity(original_incidence_matrix)
+    # if not complexity_adequate:
+    #     print("网络复杂度较低，建议使用标准模型")
+    #     # 使用简化版模型
+    #     model = EnhancedNuAwareModel(
+    #         in_channels=features.shape[1],
+    #         hidden_channels=128,
+    #         out_channels=1,
+    #         num_raw_features=5,
+    #         num_heads=3
+    #     )
+    # else:
+    #     print("网络复杂度足够，使用增强模型")
+    #     model = EnhancedNuAwareModel(
+    #         in_channels=features.shape[1],
+    #         hidden_channels=256,
+    #         out_channels=1,
+    #         num_raw_features=5,
+    #         num_heads=4
+    #     )
+
+    tuner = HyperparameterTuner(incidence_matrix, data, nu_vals)
+    import warnings
+    warnings.filterwarnings('ignore', category=UserWarning)
+    # 临时关闭optuna的进度输出
+    import optuna.logging
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    print("开始超参数调优...")
+    best_params = tuner.tune(n_trials=50)
+    # 调优完成后恢复
+    optuna.logging.set_verbosity(optuna.logging.INFO)
+    if not best_params or any(key not in best_params for key in ['hidden_channels', 'num_heads']):
+        print("智能调参失败，使用默认参数")
+        best_params = {'hidden_channels': 128, 'num_layers': 2, 'num_heads': 4,
+                       'dropout': 0.3, 'lr': 0.001, 'top_k_ratio': 0.05}
+    model = EnhancedNuAwareModel(
+        in_channels=data.x.shape[1],
+        hidden_channels=best_params['hidden_channels'],
+        out_channels=1,
+        num_raw_features=6,
+        num_heads=best_params['num_heads']
+    )
 
     print("=== 训练模型 ===")
     trained_model = train_enhanced_model(
         model, data, original_incidence_matrix, train_idx=range(len(all_seed_sets)),
-        epochs=300, lr=0.001, patience=50
+        epochs=300, lr=0.0005, patience=50
     )
 
     print("=== 评估模型性能 ===")

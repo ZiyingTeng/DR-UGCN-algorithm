@@ -1,5 +1,5 @@
 from scipy import sparse
-
+from sklearn.preprocessing import StandardScaler
 from dealpickle import process_pickle_file
 import numpy as np
 from scipy.sparse import csr_matrix
@@ -11,6 +11,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from dealtxt import create_incidence_matrix_from_file
 from connectivity import hypergraph_natural_connectivity
+from randomwalk import HypergraphRandomWalk
 from rwiec import RWIECalculator
 from rwhc import RWHCCalculator
 from nonlinear import HypergraphContagion
@@ -60,61 +61,65 @@ def compute_overlap_degree(incidence_matrix):
         overlap_degree[i] = total_overlap / count if count > 0 else 0
     return overlap_degree
 
+# def compute_pagerank(incidence_matrix):
+#     num_nodes = incidence_matrix.shape[0]
+#     node_degrees = np.sum(incidence_matrix, axis=1).A1
+#     edge_degrees = np.sum(incidence_matrix, axis=0).A1  # 超边大小作为权重
+#     alpha = 0.85
+#     max_iter = 100
+#     tol = 1e-6
+#     H_mat = incidence_matrix.tocsr()
+#     weights = edge_degrees / np.max(edge_degrees)
+#     edge_degrees = np.sum(incidence_matrix, axis=0).A1
+#     node_degrees[node_degrees == 0] = 1
+#     edge_degrees[edge_degrees == 0] = 1
+#
+#     # 构建对角矩阵的逆
+#     D_v_inv = sparse.diags(1.0 / node_degrees)  # 节点度矩阵的逆
+#     W = sparse.diags(weights)  # 超边权重矩阵
+#     D_e_inv = sparse.diags(1.0 / edge_degrees)  # 超边度矩阵的逆
+#
+#     # 构建转移概率矩阵 P = D_v^{-1} H W D_e^{-1} H^T
+#     P = D_v_inv.dot(H_mat).dot(W).dot(D_e_inv).dot(H_mat.T)
+#
+#     # 转换为CSR格式
+#     P = P.tocsr()
+#
+#     print(f"转移矩阵P的形状: {P.shape}")
+#     print(f"P的非零元素数量: {P.nnz}")
+#
+#     # 初始化PageRank向量
+#     x = np.ones(num_nodes) / num_nodes
+#     personalization_vector = np.ones(num_nodes) / num_nodes
+#
+#     print("开始PageRank迭代...")
+#
+#     # Power Iteration方法
+#     for i in range(max_iter):
+#         x_new = alpha * P.dot(x) + (1 - alpha) * personalization_vector
+#
+#         # 检查收敛条件
+#         diff = np.linalg.norm(x_new - x, 1)
+#
+#         if i < 5:  # 打印前几次迭代的差异
+#             print(f"迭代 {i + 1}: 差异 = {diff:.10f}")
+#
+#         if diff < tol:
+#             print(f"收敛于第 {i + 1} 次迭代, 最终差异 = {diff:.10f}")
+#             x = x_new
+#             break
+#
+#         x = x_new
+#     else:
+#         print(f"达到最大迭代次数 {max_iter}, 最终差异 = {diff:.10f}")
+#
+#     return x
+
 def compute_pagerank(incidence_matrix):
-    num_nodes = incidence_matrix.shape[0]
-    node_degrees = np.sum(incidence_matrix, axis=1).A1
-    alpha = 0.85
-    max_iter = 100
-    tol = 1e-6
-    # 确保矩阵是CSR格式以提高效率
-    H_mat = incidence_matrix.tocsr()
-
-    # 设置权重（默认为1）
-    weights = np.ones(H_mat.shape[1])  # 每条超边的权重
-    edge_degrees = np.sum(incidence_matrix, axis=0).A1
-    node_degrees[node_degrees == 0] = 1
-    edge_degrees[edge_degrees == 0] = 1
-
-    # 构建对角矩阵的逆
-    D_v_inv = sparse.diags(1.0 / node_degrees)  # 节点度矩阵的逆
-    W = sparse.diags(weights)  # 超边权重矩阵
-    D_e_inv = sparse.diags(1.0 / edge_degrees)  # 超边度矩阵的逆
-
-    # 构建转移概率矩阵 P = D_v^{-1} H W D_e^{-1} H^T
-    P = D_v_inv.dot(H_mat).dot(W).dot(D_e_inv).dot(H_mat.T)
-
-    # 转换为CSR格式
-    P = P.tocsr()
-
-    print(f"转移矩阵P的形状: {P.shape}")
-    print(f"P的非零元素数量: {P.nnz}")
-
-    # 初始化PageRank向量
-    x = np.ones(num_nodes) / num_nodes
-    personalization_vector = np.ones(num_nodes) / num_nodes
-
-    print("开始PageRank迭代...")
-
-    # Power Iteration方法
-    for i in range(max_iter):
-        x_new = alpha * P.dot(x) + (1 - alpha) * personalization_vector
-
-        # 检查收敛条件
-        diff = np.linalg.norm(x_new - x, 1)
-
-        if i < 5:  # 打印前几次迭代的差异
-            print(f"迭代 {i + 1}: 差异 = {diff:.10f}")
-
-        if diff < tol:
-            print(f"收敛于第 {i + 1} 次迭代, 最终差异 = {diff:.10f}")
-            x = x_new
-            break
-
-        x = x_new
-    else:
-        print(f"达到最大迭代次数 {max_iter}, 最终差异 = {diff:.10f}")
-
-    return x
+    # 创建 HypergraphRandomWalk 实例（从 randomwalk.py）
+    rw = HypergraphRandomWalk(incidence_matrix)
+    # 计算稳态分布作为 PageRank 分数
+    return rw.calculate_stationary_distribution()
 
 
 # 动态计算rwhc和rwiec
@@ -138,10 +143,12 @@ def compute_features(incidence_matrix):
     rwiec = RWIECalculator(incidence_matrix).calculate_rwiec(gamma=gamma)
     motif = compute_motif_coefficient(incidence_matrix)
     overlap = compute_overlap_degree(incidence_matrix)
+    pagerank = compute_pagerank(incidence_matrix)
+
 
     # === 新增：特征标准化和诊断 ===
-    features_raw = [hdc, rwhc, rwiec, motif, overlap]
-    feature_names = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap']
+    features_raw = [hdc, rwhc, rwiec, motif, overlap, pagerank]
+    feature_names = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap', 'Pagerank']
 
     print("=== 特征值诊断 ===")
     for i, (feat, name) in enumerate(zip(features_raw, feature_names)):
@@ -279,7 +286,7 @@ def compute_infected_fraction(incidence_matrix, top_nodes, lambda_val, nu, mu=1.
         infected_fractions.append(infected_fraction)
     avg_infected_fraction = np.mean(infected_fractions)
     std_infected_fraction = np.std(infected_fractions)
-    print(f"nu={nu:.2f}, lambda_val={lambda_val:.4f}, avg_infected_fraction={avg_infected_fraction:.4f}, std={std_infected_fraction:.4f}")
+    # print(f"nu={nu:.2f}, lambda_val={lambda_val:.4f}, avg_infected_fraction={avg_infected_fraction:.4f}, std={std_infected_fraction:.4f}")
     return avg_infected_fraction
 
 def cache_baseline_scores(incidence_matrix):
@@ -341,7 +348,7 @@ def split_dataset(num_nodes, train_ratio=0.7, val_ratio=0.15):
     return train_idx, val_idx, test_idx
 
 
-def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num_runs=20):
+def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num_runs=10):
     """
     生成多样化的候选种子集
 
@@ -359,22 +366,22 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     features = {}
     features['HDC'] = compute_hdc(incidence_matrix)
     features['RWHC'] = RWHCCalculator(incidence_matrix).calculate_rwhc()
-    # features['Pagerank'] = compute_pagerank(incidence_matrix)
     features['RWIEC'] = RWIECalculator(incidence_matrix).calculate_rwiec()
     features['Motif'] = compute_motif_coefficient(incidence_matrix)
     features['Overlap'] = compute_overlap_degree(incidence_matrix)
+    features['Pagerank'] = compute_pagerank(incidence_matrix)
 
     # 2. 权重初步设定
     if nu < 1.3:
-        weights = np.array([0.5, 0.2, 0.1, 0.15, 0.05])  # 偏向HDC和Motif
+        weights = np.array([0.4, 0.2, 0.1, 0.15, 0.05, 0.3])  # 偏向HDC和Motif
     elif nu < 1.7:
-        weights = np.array([0.3, 0.25, 0.2, 0.15, 0.1])  # 相对均衡
+        weights = np.array([0.5, 0.2, 0.2, 0.2, 0.1, 0.3])  # 相对均衡
     else:
-        weights = np.array([0.2, 0.3, 0.25, 0.15, 0.1])  # 偏向RWHC和RWIEC
+        weights = np.array([0.5, 0.3, 0.25, 0.15, 0.1, 0.3])  # 偏向RWHC和RWIEC
 
     # 3. 计算初始分数并选择Top M节点
     composite_scores = np.zeros(num_nodes)
-    feature_keys = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap']
+    feature_keys = ['HDC', 'RWHC', 'RWIEC', 'Motif', 'Overlap', 'Pagerank']
     for i, key in enumerate(feature_keys):
         # 归一化每个特征
         normalized_feat = (features[key] - np.min(features[key])) / (
@@ -392,7 +399,7 @@ def generate_dynamic_candidate_sets(incidence_matrix, nu, top_k, lambda_val, num
     # 确保包含纯Top-K集 作为第一个
     candidate_sets.append(top_k_indices.copy())
 
-    num_candidates = 50
+    num_candidates = 30
     # 生成其他候选集
     for i in range(num_candidates - 1):
         if np.random.rand() < 0.5:  # 50%的概率进行随机替换
@@ -445,7 +452,7 @@ def prepare_enhanced_training_data(incidence_matrix, lambda_val, nu_values, top_
 
         candidate_sets, candidate_scores = generate_dynamic_candidate_sets(
             incidence_matrix, nu, top_k, lambda_val,
-            num_runs=20
+            num_runs=10
         )
 
         all_candidate_sets.extend(candidate_sets)
@@ -544,9 +551,9 @@ def assess_network_complexity(incidence_matrix):
 
 
 def analyze_critical_nodes_comparison(incidence_matrix, baseline_scores, enhanced_scores, top_k=10):
-    """详细分析关键节点对比"""
+    """详细分析关键节点对比，新增超边覆盖分析"""
     print("\n" + "=" * 60)
-    print("关键节点对比分析")
+    print("关键节点对比分析（含超边覆盖）")
     print("=" * 60)
 
     # 获取各方法的关键节点
@@ -569,8 +576,68 @@ def analyze_critical_nodes_comparison(incidence_matrix, baseline_scores, enhance
     for method, nodes in methods.items():
         print(f"{method:15}: {nodes}")
 
-    # 计算重叠度矩阵
-    print(f"\n重叠度矩阵 (Top{top_k}):")
+    # === 新增：超边覆盖分析 ===
+    print(f"\n{'=' * 60}")
+    print("超边覆盖分析")
+    print(f"{'=' * 60}")
+
+    # 计算超边大小分布
+    edge_sizes = np.sum(incidence_matrix, axis=0).A1  # 每个超边的大小
+    total_edges = incidence_matrix.shape[1]  # 总超边数
+
+    print(f"超图基本信息: 总超边数={total_edges}, 超边平均大小={np.mean(edge_sizes):.2f}")
+    print(f"{'方法':<15} {'覆盖超边数':<10} {'覆盖率(%)':<10} {'覆盖超边平均大小':<15} {'覆盖超边大小标准差':<15}")
+    print(f"{'-' * 70}")
+
+    for method, nodes in methods.items():
+        # 计算该节点集覆盖的超边
+        covered_edges = set()
+        for node in nodes:
+            edges_of_node = incidence_matrix[node].nonzero()[1]
+            covered_edges.update(edges_of_node)
+
+        coverage_count = len(covered_edges)
+        coverage_ratio = (coverage_count / total_edges) * 100
+
+        # 计算覆盖超边的大小统计
+        if coverage_count > 0:
+            covered_edge_sizes = edge_sizes[list(covered_edges)]
+            avg_size = np.mean(covered_edge_sizes)
+            std_size = np.std(covered_edge_sizes)
+        else:
+            avg_size = 0.0
+            std_size = 0.0
+
+        print(f"{method:<15} {coverage_count:<10} {coverage_ratio:<10.1f} {avg_size:<15.2f} {std_size:<15.2f}")
+
+    # === 新增：覆盖超边的重叠分析 ===
+    print(f"\n{'=' * 60}")
+    print("覆盖超边重叠分析")
+    print(f"{'=' * 60}")
+
+    # 计算各方法覆盖超边的重叠情况
+    covered_edges_dict = {}
+    for method, nodes in methods.items():
+        covered_edges = set()
+        for node in nodes:
+            edges_of_node = incidence_matrix[node].nonzero()[1]
+            covered_edges.update(edges_of_node)
+        covered_edges_dict[method] = covered_edges
+
+    # 计算Enhanced-NuGNN与其他方法的超边重叠度
+    enhanced_edges = covered_edges_dict['Enhanced-NuGNN']
+    print("Enhanced-NuGNN与其他方法的超边重叠情况:")
+    for method, edges in covered_edges_dict.items():
+        if method != 'Enhanced-NuGNN':
+            overlap = len(enhanced_edges & edges)
+            jaccard = overlap / len(enhanced_edges | edges) if len(enhanced_edges | edges) > 0 else 0
+            print(f"  vs {method}: 重叠超边数={overlap}, Jaccard相似度={jaccard:.3f}")
+
+    # 原有的重叠度矩阵计算保持不变
+    print(f"\n{'=' * 60}")
+    print("节点重叠度矩阵 (Top{top_k}):")
+    print(f"{'=' * 60}")
+
     method_names = list(methods.keys())
     overlap_matrix = np.zeros((len(method_names), len(method_names)))
 
@@ -601,6 +668,16 @@ def analyze_critical_nodes_comparison(incidence_matrix, baseline_scores, enhance
         unique_degrees = node_degrees[list(unique_to_enhanced)]
         print(
             f"这些节点的度分布: 最小={np.min(unique_degrees)}, 最大={np.max(unique_degrees)}, 平均={np.mean(unique_degrees):.2f}")
+
+        # === 新增：分析独有节点的超边覆盖特性 ===
+        print("独有节点的超边覆盖特性:")
+        for node in sorted(unique_to_enhanced):
+            edges_of_node = incidence_matrix[node].nonzero()[1]
+            edge_size_info = []
+            for edge in edges_of_node:
+                edge_size = edge_sizes[edge]
+                edge_size_info.append(f"E{edge}({edge_size}节点)")
+            print(f"  节点{node}: 覆盖超边 {', '.join(edge_size_info)}")
     else:
         print(f"\nEnhanced-NuGNN没有独有关键节点")
 

@@ -158,21 +158,20 @@ class FiLMLayer(nn.Module):
 
 
 class EnhancedNuAwareModel(nn.Module):
-    def __init__(self, in_channels, hidden_channels, out_channels, num_raw_features=5, num_heads=4):
+    def __init__(self, in_channels, hidden_channels=64, out_channels=1, num_raw_features=6, num_heads=4):
         super().__init__()
         self.num_raw_features = num_raw_features
         self.num_heads = num_heads
-        # 更温和的标准化
-        self.feature_norm = nn.BatchNorm1d(in_channels, affine=False)  # 只标准化，不学习参数
 
-        # 特征重要性保护机制
-        self.feature_importance_preserver = nn.Parameter(torch.ones(num_raw_features))
+        # === 改进的特征处理 ===
+        # 使用无参数化的BatchNorm（只标准化，不学习缩放参数）
+        self.feature_norm = nn.BatchNorm1d(in_channels, affine=False)
 
-        # 动态调整FiLM强度
-        self.film_strength = nn.Parameter(torch.tensor(0.5))  # 可学习的强度参数
-
-        # 更稳健的辅助网络初始化
-        self._initialize_with_prior_knowledge()
+        # 特征重要性保护参数（可学习，但有约束）
+        self.feature_importance = nn.Parameter(torch.ones(num_raw_features))
+        # 初始化保护参数：HDC权重较高
+        with torch.no_grad():
+            self.feature_importance.data = torch.tensor([1.5, 1.0, 1.0, 0.8, 0.8, 1.2])  # HDC, RWHC, RWIEC, Motif, Overlap, Pagerank
 
         # 主通路 - 非线性黑箱
         self.film = FiLMLayer(in_channels)
@@ -180,71 +179,59 @@ class EnhancedNuAwareModel(nn.Module):
             in_channels=in_channels,
             hidden_channels=hidden_channels,
             out_channels=hidden_channels,
-            num_layers=4,
-            dropout=0.4
+            num_layers=2,
+            dropout=0.3
         )
 
-        # 多头注意力机制
+        # 简化注意力机制（减少参数量）
         self.multi_head_attention = nn.ModuleList([
             nn.Sequential(
-                nn.Linear(hidden_channels + 2, hidden_channels // 2),
+                nn.Linear(hidden_channels + 2, hidden_channels // 4),  # 减少维度
                 nn.ReLU(),
-                nn.Linear(hidden_channels // 2, 1),
+                nn.Dropout(0.2),
+                nn.Linear(hidden_channels // 4, 1),
                 nn.Sigmoid()
-            ) for _ in range(num_heads)
+            ) for _ in range(min(num_heads, 4))  # 限制注意力头数量
         ])
 
-        self.attention_combiner = nn.Linear(num_heads, 1)
+        self.attention_combiner = nn.Linear(len(self.multi_head_attention), 1)
 
-        # 输出层
+        # 简化输出层
         self.output_layer = nn.Sequential(
             nn.Linear(hidden_channels, hidden_channels // 2),
             nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(hidden_channels // 2, out_channels)
+            nn.Dropout(0.2),  # 减少dropout
+            nn.Linear(hidden_channels // 2, out_channels),
+            nn.Tanh()  # 使用Tanh替代Sigmoid，避免梯度消失
         )
 
-        # 辅助通路
-        self.auxiliary_net = nn.Sequential(
-            nn.Linear(1, 32),
-            nn.ReLU(),
-            nn.Linear(32, num_raw_features),
-            nn.Softmax(dim=-1)
-        )
+        # # 辅助通路 - 增加约束
+        # self.auxiliary_net = nn.Sequential(
+        #     nn.Linear(1, 16),  # 减少隐藏单元
+        #     nn.ReLU(),
+        #     nn.Linear(16, num_raw_features),
+        #     nn.Softmax(dim=-1)
+        # )
 
-        # 记忆增强
-        self.memory_bank = nn.Parameter(torch.randn(30, hidden_channels))  # 30个记忆模式
-        self.memory_attention = nn.Sequential(
-            nn.Linear(hidden_channels * 2, hidden_channels),
-            nn.ReLU(),
-            nn.Linear(hidden_channels, 1),
-            nn.Sigmoid()
-        )
+        # 简化记忆机制
+        self.memory_bank = nn.Parameter(torch.randn(10, hidden_channels) * 0.1)  # 减少记忆模式
 
-    def _initialize_auxiliary_net(self):
-        """用合理的初始值初始化辅助网络"""
-        for layer in self.auxiliary_net:
-            if isinstance(layer, nn.Linear):
-                nn.init.xavier_uniform_(layer.weight)
-                if layer.bias is not None:
-                    nn.init.zeros_(layer.bias)
+        # self._initialize_with_prior_knowledge()
 
-    def _initialize_with_prior_knowledge(self):
-        """基于先验知识初始化辅助网络"""
-        # ν=1.0时，HDC应该权重较高；ν>1.5时，RWHC/RWIEC权重升高
-        with torch.no_grad():
-            # 设置合理的初始偏置
-            self.auxiliary_net[2].bias.data = torch.tensor([0.3, 0.2, 0.2, 0.15, 0.15])  # HDC, RWHC, RWIEC, Motif, overlap
+    # def _initialize_with_prior_knowledge(self):
+    #     """基于先验知识初始化"""
+    #     # 更温和的初始化
+    #     for layer in self.auxiliary_net:
+    #         if isinstance(layer, nn.Linear):
+    #             nn.init.xavier_uniform_(layer.weight, gain=0.5)  # 减小初始化规模
+    #             if layer.bias is not None:
+    #                 nn.init.constant_(layer.bias, 0.1)
+    #
+    #     # 辅助网络偏置：鼓励HDC在初期占主导
+    #     with torch.no_grad():
+    #         self.auxiliary_net[2].bias.data = torch.tensor([0.5, 0.2, 0.1, 0.1, 0.1, 0.1])  # 更强调HDC
 
     def forward(self, data, nu, node_degrees=None, return_auxiliary=False):
-        # 保护原始特征的重要性
-        raw_features = data.x[:, :self.num_raw_features]
-        protected_features = raw_features * self.feature_importance_preserver
-
-        # 将保护后的特征与其他特征结合
-        processed_features = torch.cat([protected_features, data.x[:, self.num_raw_features:]], dim=1)
-        processed_features = self.feature_norm(processed_features)
-
         # 准备θ张量
         if not isinstance(nu, torch.Tensor):
             nu_tensor = torch.tensor([nu], device=data.x.device, dtype=torch.float)
@@ -256,30 +243,45 @@ class EnhancedNuAwareModel(nn.Module):
         if nu_tensor.dim() == 1:
             nu_tensor = nu_tensor.unsqueeze(1)
 
-        # 辅助通路：生成特征权重
-        aux_weights = self.auxiliary_net(nu_tensor)  # [1, num_raw_features]
-
-        # 计算线性分数
+        # === 改进的特征保护 ===
         raw_features = data.x[:, :self.num_raw_features]
-        aux_weights_expanded = aux_weights.expand(raw_features.size(0), -1)
-        linear_scores = torch.sum(aux_weights_expanded * raw_features, dim=1, keepdim=True)
+
+        # 应用特征重要性保护（带约束）
+        protected_features = raw_features * torch.clamp(self.feature_importance, 0.5, 2.0)
+
+        # 组合特征
+        if data.x.shape[1] > self.num_raw_features:
+            other_features = data.x[:, self.num_raw_features:]
+            processed_features = torch.cat([protected_features, other_features], dim=1)
+        else:
+            processed_features = protected_features
+
+        # 温和的标准化
+        processed_features = self.feature_norm(processed_features)
+
+        # # 辅助通路：生成特征权重（带温度调节）
+        # aux_weights = self.auxiliary_net(nu_tensor)
+        #
+        # # 计算线性分数（作为参考基准）
+        # aux_weights_expanded = aux_weights.expand(raw_features.size(0), -1)
+        # linear_scores = torch.sum(aux_weights_expanded * raw_features, dim=1, keepdim=True)
 
         # 主通路：非线性变换
-        filmed_x = self.film(data.x, nu_tensor)
+        filmed_x = self.film(processed_features, nu_tensor)
         data_copy = data.clone()
         data_copy.x = filmed_x
 
+        # 使用更稳定的骨干网络
         node_embeddings = self.backbone(data_copy)
 
         # 处理节点度
         if node_degrees is None:
             node_degrees = torch.zeros(node_embeddings.size(0), 1, device=node_embeddings.device)
 
-        # 多头注意力机制
+        # 简化注意力机制
         nu_expanded = nu_tensor.expand(node_embeddings.size(0), -1)
         attention_input = torch.cat([node_embeddings, nu_expanded, node_degrees], dim=1)
 
-        # 各头独立计算注意力
         head_outputs = []
         for head in self.multi_head_attention:
             head_weights = head(attention_input)
@@ -289,26 +291,40 @@ class EnhancedNuAwareModel(nn.Module):
         attention_weights = torch.cat(head_outputs, dim=1)
         combined_weights = self.attention_combiner(attention_weights)
 
-        # 记忆增强
+        # 轻量记忆增强
         memory_enhanced = self._apply_memory_enhancement(node_embeddings)
 
-        attended_embeddings = memory_enhanced * combined_weights
+        # 应用注意力权重
+        attended_embeddings = memory_enhanced * torch.sigmoid(combined_weights)  # 使用sigmoid约束权重范围
 
-        # 最终输出
+        # 最终输出（带输出约束）
         main_scores = self.output_layer(attended_embeddings)
 
+        # 确保输出在合理范围内
+        main_scores = torch.tanh(main_scores)  # 约束到[-1, 1]
+
+        linear_scores_placeholder = torch.zeros_like(main_scores)
+
+        # if return_auxiliary:
+        #     return main_scores, linear_scores, aux_weights, attention_weights
         if return_auxiliary:
-            return main_scores, linear_scores, aux_weights, attention_weights
-        return main_scores, linear_scores
+            # 返回占位符值
+            return main_scores, linear_scores_placeholder, torch.zeros(self.num_raw_features), attention_weights
+        return main_scores, linear_scores_placeholder
 
     def _apply_memory_enhancement(self, embeddings):
         """轻量级记忆增强"""
-        # 计算与记忆模式的相似度
-        similarity = torch.matmul(embeddings, self.memory_bank.t())
+        if self.memory_bank.size(0) == 0:
+            return embeddings
+
+        # 计算相似度（带温度调节）
+        similarity = torch.matmul(embeddings, self.memory_bank.t()) / torch.sqrt(
+            torch.tensor(embeddings.size(-1), dtype=torch.float)
+        )
         attention_weights = F.softmax(similarity, dim=1)
 
         # 加权记忆反馈
         memory_output = torch.matmul(attention_weights, self.memory_bank)
 
-        # 残差连接
-        return embeddings + 0.3 * memory_output
+        # 温和的残差连接
+        return embeddings + 0.1 * memory_output  # 减小记忆影响
