@@ -6,5 +6,6 @@ However, owing to the inherent complexity, nonlinearity, and the challenges in i
 This consequently presents two significant challenges: 
 1) the effective capture of hypergraph characteristics;
 2) the precise identification of nodes within the hypergraph that can be more accurately designated as key nodes.
+
 The algorithm predominantly adopts a black-box methodology, amalgamating feature labels with external validation derived from empirical simulations, thereby enabling the model to autonomously learn these complex interconnections to achieve a more robust ranking compared to those obtained through conventional fixed criteria.
 Subsequently, the results are rigorously validated and interpreted from multiple perspectives and standards.
