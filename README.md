@@ -1,4 +1,9 @@
-# DR-UGCN-algorithm
-DR-UGCN Critical Nodes Identification Algorithm In Hypergraph
+# Enhangced-NuGNN-algorithm
+Enhangced-NuGNN Critical Nodes Identification Algorithm In Hypergraph
 
-Amid the lack of unified definitions for hypergraph-related extensions, we propose two new characteristic metrics capturing multi-dimensional features and integrate them with a deep learning mechanism and a nonlinear propagation model to dynamically simulate information diffusion. This leads to the development of the DR-UGCN algorithm that identifies critical nodes by simultaneously considering their information propagation capacity and their impact on hypergraph connectivity when removed.
+在初始特征值输入阶段，提出了两个基于随机游走的特征值中心性：信息熵中心性和热力值中心性，用于捕捉动态特性，结合静态特征，给模型一个初步认知
+但由于超图结构的复杂性、非线性以及其深层特性与连接性质的难以解释性，我们很难用线性、扁平的方式去描述或定义它的复杂特征，因而引发两个难题：
+1.对于超图特性的捕捉
+2.对于超图中那样的节点更能够被称作关键节点的定义
+算法主要基于黑箱的思路，结合特征标签与实际模拟带来的外部验证，让模型自发地去学习那些复杂的联系，以获得比通过固定标准识别出的节点排序更为有说服力的排序
+然后通过不同角度和标准去验证和说明
