@@ -1,5 +1,5 @@
-# θ-DHGNN-algorithm
-θ-DHGNN: Dynamic Hypergraph Neural Networks with Nonlinear Contagion Adaptation
+# NDA-HGNN-algorithm
+NDA-HGNN: Nonlinear Diffusion-Aware Hypergraph Neural Network For Identifying Critical Nodes
 
 During the initial eigenvalue input phase, two random walk-based eigenvalue centrality measures—information entropy centrality and thermal centrality—were introduced to capture dynamic characteristics and integrate with static features, thereby providing the model with foundational insights.
 
