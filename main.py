@@ -1,5 +1,3 @@
-# θ从1到2
-
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,7 +5,7 @@ from scipy.sparse import csr_matrix
 from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data
 from UniGGCN import UniGCNRegression
-from new_aware_model import NuAwareUniGCN, NuAwareUniGCNWithFiLM, EnhancedNuAwareModel
+from NDA_HGNN_model import NonlinearDiffusionAwareModel
 from nonlinear import HypergraphContagion
 from rwhc import RWHCCalculator
 from rwiec import RWIECalculator
@@ -15,7 +13,7 @@ from utils import load_hypergraph, compute_features, split_dataset, compute_infe
     load_hypergraph_pickle, prepare_enhanced_training_data, evaluate_seed_set_diversity, evaluate_infection_dynamics, \
     assess_network_complexity, compute_motif_coefficient, compute_overlap_degree, compute_pagerank, \
     analyze_critical_nodes_comparison
-from baseline import compute_hdc, compute_dc, compute_bc, compute_sc
+from baseline import *
 from connectivity import hypergraph_natural_connectivity
 import matplotlib.pyplot as plt
 import pickle
@@ -119,11 +117,11 @@ def compare_connectivity_across_algorithms(incidence_matrix, baseline_scores, en
     results = {}
 
     # 评估增强算法
-    print(f"Evaluating Enhanced-NuGNN connectivity...")
+    print(f"Evaluating NDA-HGNN connectivity...")
     enhanced_connectivity = evaluate_connectivity_after_removal(
-        incidence_matrix, enhanced_scores, "Enhanced-NuGNN", removal_ratios
+        incidence_matrix, enhanced_scores, "NDA-HGNN", removal_ratios
     )
-    results['Enhanced-NuGNN'] = enhanced_connectivity
+    results['NDA-HGNN'] = enhanced_connectivity
 
     # 评估基线算法
     for method_name, scores in baseline_scores.items():
@@ -136,7 +134,7 @@ def compare_connectivity_across_algorithms(incidence_matrix, baseline_scores, en
     # 绘制结果
     plt.figure(figsize=(10, 6))
     colors = {
-        'Enhanced-NuGNN': 'blue',
+        'NDA-HGNN': 'blue',
         'DC': 'red',
         'BC': 'green',
         'HDC': 'orange',
@@ -411,204 +409,6 @@ def analyze_auxiliary_weights(model, data, nu_values, incidence_matrix):
         print(f"ν = {nu:.1f}: {', '.join([f'{name}:{w:.3f}' for name, w in zip(feature_names, weights)])}")
 
 
-def train_with_seed_sets(model, data, epochs=200, lr=0.001, patience=30, focus_nu_range=(1.3, 1.8)):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=10, factor=0.5)
-    mse_loss = nn.MSELoss()
-    ranking_loss = nn.MarginRankingLoss(margin=0.1)
-    best_loss = float('inf')
-    patience_counter = 0
-
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0
-        indices = torch.randperm(len(data.seed_sets))
-        for idx in indices:
-            seed_set = data.seed_sets[idx]
-            nu_val = data.seed_set_nu[idx].item()
-            true_label = data.seed_set_labels[idx]
-            if focus_nu_range and not (focus_nu_range[0] <= nu_val <= focus_nu_range[1]):
-                if np.random.rand() < 0.7:
-                    continue
-            optimizer.zero_grad()
-            node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=device).view(-1, 1)
-            node_scores = model(data, nu_val, node_degrees)
-            seed_set_scores = node_scores[seed_set]
-            predicted_score = torch.sum(seed_set_scores)
-            loss_mse = mse_loss(predicted_score, true_label)
-            if idx > 0:
-                other_idx = idx - 1
-                other_score = torch.sum(node_scores[data.seed_sets[other_idx]])
-                other_label = data.seed_set_labels[other_idx]
-                loss_rank = ranking_loss(predicted_score, other_score,
-                                         torch.tensor(1.0 if true_label > other_label else -1.0))
-                weight_rank = 0.4 + 0.2 * (nu_val - 1.0)
-                loss = (1 - weight_rank) * loss_mse + weight_rank * loss_rank
-            else:
-                loss = loss_mse
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            total_loss += loss.item()
-            print(f"Epoch {epoch + 1}, Loss: {total_loss / len(indices):.4f}")
-        val_loss = 0
-        scheduler.step(val_loss)
-        if val_loss < best_loss:
-            best_loss = val_loss
-            patience_counter = 0
-        else:
-            patience_counter += 1
-        if patience_counter >= patience:
-            break
-    return model
-
-
-def focused_nu_training(model, data, nu_values, Y_real, focus_nu=1.4, epochs=200, lr=0.001):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    data = data.to(device)
-    Y_real_tensor = torch.tensor(Y_real, dtype=torch.float).to(device)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', patience=15, factor=0.5)
-    criterion = nn.MSELoss()
-
-    train_idx, val_idx, test_idx = split_dataset(data.num_nodes)
-
-    # 找到focus_nu对应的索引
-    focus_idx = np.where(np.isclose(nu_values, focus_nu))[0][0]
-
-    best_val_loss = float('inf')
-    best_overall_loss = float('inf')
-    patience_counter = 0
-    patience = 30
-
-    for epoch in range(epochs):
-        model.train()
-
-        # 动态调整训练策略：前期全面训练，后期专注薄弱点
-        if epoch < epochs // 2:
-            # 前期：全面训练所有ν值
-            nu_idx = np.random.randint(len(nu_values))
-        else:
-            # 后期：50%概率训练focus_nu，50%概率训练其他θ
-            if np.random.rand() < 0.5:
-                nu_idx = focus_idx
-            else:
-                other_indices = [i for i in range(len(nu_values)) if i != focus_idx]
-                nu_idx = np.random.choice(other_indices)
-
-        nu = nu_values[nu_idx]
-
-        optimizer.zero_grad()
-        out = model(data, nu)
-        y_true = Y_real_tensor[:, nu_idx].view(-1, 1)
-
-        loss = criterion(out[train_idx], y_true[train_idx])
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-
-        # 验证：同时检查focus_nu和整体性能
-        model.eval()
-        with torch.no_grad():
-            # 检查focus_nu的性能
-            focus_out = model(data, focus_nu)
-            focus_true = Y_real_tensor[:, focus_idx].view(-1, 1)
-            focus_val_loss = criterion(focus_out[val_idx], focus_true[val_idx])
-
-            # 检查整体性能
-            overall_val_loss = 0
-            for i, nu_val in enumerate(nu_values):
-                val_out = model(data, nu_val)
-                val_true = Y_real_tensor[:, i].view(-1, 1)
-                overall_val_loss += criterion(val_out[val_idx], val_true[val_idx]).item()
-            overall_val_loss /= len(nu_values)
-
-        scheduler.step(overall_val_loss)
-
-        if epoch % 20 == 0:
-            print(f'Epoch {epoch}: ν={nu:.1f}, Train Loss: {loss.item():.4f}, '
-                  f'Focus ν Loss: {focus_val_loss.item():.4f}, Overall Val Loss: {overall_val_loss:.4f}')
-
-        # 早停
-        if overall_val_loss < best_overall_loss:
-            best_overall_loss = overall_val_loss
-            best_val_loss = focus_val_loss.item()
-            patience_counter = 0
-            torch.save(model.state_dict(), 'best_model.pth')
-        else:
-            patience_counter += 1
-            if patience_counter >= patience:
-                print(f"Early stopping at epoch {epoch}")
-                break
-
-    model.load_state_dict(torch.load('best_model.pth', map_location=device))
-    return model
-
-
-def train_model(model, data, train_idx, val_idx, epochs=500, lr=0.001, patience=50):
-    """监督学习训练模型"""
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model.to(device)
-    data.x = data.x.to(device)
-    data.edge_index = data.edge_index.to(device)
-    data.Pv = data.Pv.to(device)
-    data.PvT = data.PvT.to(device)
-    data.y = data.y.to(device)
-
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
-    criterion = nn.MSELoss()
-
-    model.train()
-    best_val_loss = float('inf')
-    patience_counter = 0
-    train_losses = []
-    val_losses = []
-
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        out = model(data)
-        loss = criterion(out[train_idx], data.y[train_idx])
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        model.eval()
-        with torch.no_grad():
-            val_out = model(data)
-            val_loss = criterion(val_out[val_idx], data.y[val_idx])
-        scheduler.step(val_loss)
-        model.train()
-
-        train_losses.append(loss.item())
-        val_losses.append(val_loss.item())
-
-        if epoch % 50 == 0:
-            print(
-                f'Epoch {epoch}, Train Loss: {loss.item():.4f}, Val Loss: {val_loss.item():.4f}, LR: {optimizer.param_groups[0]["lr"]:.6f}')
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            patience_counter = 0
-            # 保存最佳模型
-            torch.save(model.state_dict(), 'best_model.pth')
-        else:
-            patience_counter += 1
-
-        if patience_counter >= patience:
-            print(f"Early stopping at epoch {epoch}")
-            break
-
-    # 加载最佳模型
-    if os.path.exists('best_model.pth'):
-        model.load_state_dict(torch.load('best_model.pth', map_location=device))
-    return model, train_losses, val_losses
-
-
 def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, top_k_ratio, num_runs=20):
     results = {}
     all_seed_sets = {}
@@ -628,19 +428,19 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
                                         dtype=torch.float, device=data.x.device).view(-1, 1)
             main_scores, linear_scores = model(data, nu, node_degrees)
             enhanced_nodes = np.argsort(main_scores.cpu().numpy().flatten())[-top_k:]
-            nu_seed_sets['Enhanced-NuGNN'] = enhanced_nodes
+            nu_seed_sets['NDA-HGNN'] = enhanced_nodes
 
-            # === 新增：打印Enhanced-NuGNN的关键节点和分数 ===
+            # === 新增：打印NDA-HGNN的关键节点和分数 ===
             enhanced_scores = main_scores.cpu().numpy().flatten()
             top_enhanced_indices = np.argsort(enhanced_scores)[-top_k:][::-1]  # 从高到低
-            print(f"Enhanced-NuGNN Top{top_k}节点索引: {top_enhanced_indices}")
-            print(f"Enhanced-NuGNN Top{top_k}节点分数: {enhanced_scores[top_enhanced_indices]}")
+            print(f"NDA-HGNN Top{top_k}节点索引: {top_enhanced_indices}")
+            print(f"NDA-HGNN Top{top_k}节点分数: {enhanced_scores[top_enhanced_indices]}")
 
-            # === 修复：评估Enhanced-NuGNN的性能并添加到results中 ===
+            # === 修复：评估NDA-HGNN的性能并添加到results中 ===
             enhanced_dynamics = evaluate_infection_dynamics(
                 incidence_matrix, enhanced_nodes, lambda_val, nu, num_runs=num_runs
             )
-            results[nu]['Enhanced-NuGNN'] = {
+            results[nu]['NDA-HGNN'] = {
                 'final_fraction': enhanced_dynamics['final_fraction'],
                 'dynamics': enhanced_dynamics
             }
@@ -687,56 +487,29 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
 
         # === 新增：打印方法间重叠度对比 ===
         print(f"\n--- 方法间重叠度对比 (ν={nu:.1f}) ---")
-        enhanced_set = set(nu_seed_sets['Enhanced-NuGNN'])
+        enhanced_set = set(nu_seed_sets['NDA-HGNN'])
         for method, nodes in nu_seed_sets.items():
-            if method != 'Enhanced-NuGNN':
+            if method != 'NDA-HGNN':
                 method_set = set(nodes)
                 overlap = len(enhanced_set & method_set)
                 jaccard = overlap / len(enhanced_set | method_set) if len(enhanced_set | method_set) > 0 else 0
-                print(f"Enhanced-NuGNN vs {method}: 重叠{overlap}个节点, Jaccard相似度={jaccard:.3f}")
+                print(f"NDA-HGNN vs {method}: 重叠{overlap}个节点, Jaccard相似度={jaccard:.3f}")
 
-        # === 修复：确保Enhanced-NuGNN的结果存在再打印 ===
-        if 'Enhanced-NuGNN' in results[nu]:
-            print(f"ν={nu:.1f}: Enhanced-NuGNN: {results[nu]['Enhanced-NuGNN']['final_fraction']:.4f}")
+        # === 修复：确保NDA-HGNN的结果存在再打印 ===
+        if 'NDA-HGNN' in results[nu]:
+            print(f"ν={nu:.1f}: NDA-HGNN: {results[nu]['NDA-HGNN']['final_fraction']:.4f}")
         else:
-            print(f"ν={nu:.1f}: Enhanced-NuGNN结果缺失")
+            print(f"ν={nu:.1f}: NDA-HGNN结果缺失")
 
     return results, all_seed_sets
-
-
-def plot_results(nu_vals, results):
-    colors = {
-        'Enhanced-NuGNN': 'blue',
-        'DC': 'red',
-        'BC': 'green',
-        'HDC': 'orange',
-        'SC': 'purple'
-    }
-    plt.figure(figsize=(10, 6))
-    if len(nu_vals) > 0 and results:  # 检查非空：len(nu_vals) 兼容 NumPy 数组
-        algorithms = list(results[nu_vals[0]].keys())  # 从第一个 nu 获取算法名
-        for alg in algorithms:
-            fractions = [results[nu].get(alg, 0.0) for nu in nu_vals]
-            plt.plot(nu_vals, fractions, label=alg, color=colors.get(alg, 'black'), marker='o')
-    else:
-        print("Warning: No results to plot")
-    plt.xlabel('ν')
-    plt.ylabel('Infected Fraction')
-    plt.title('Senate')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig('senate2-dy-black .png')
-    plt.show()
-
 
 def plot_enhanced_results(nu_vals, results, all_seed_sets):
     """多维度可视化结果"""
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
     # 1. 最终感染比例
-    colors = {'Enhanced-NuGNN': 'blue', 'DC': 'red', 'BC': 'green', 'HDC': 'orange', 'SC': 'purple'}
-    for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
+    colors = {'NDA-HGNN': 'blue', 'DC': 'red', 'BC': 'green', 'HDC': 'orange', 'SC': 'purple'}
+    for method in ['NDA-HGNN', 'DC', 'BC', 'HDC', 'SC']:
         fractions = [results[nu][method]['final_fraction'] for nu in nu_vals]
         ax1.plot(nu_vals, fractions, label=method, color=colors.get(method, 'black'), marker='o', linewidth=2)
     ax1.set_xlabel('θ')
@@ -746,7 +519,7 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     ax1.grid(True)
 
     # 2. 达到50%感染的时间
-    for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
+    for method in ['NDA-HGNN', 'DC', 'BC', 'HDC', 'SC']:
         times = [results[nu][method]['dynamics']['time_to_half'] for nu in nu_vals]
         ax2.plot(nu_vals, times, label=method, color=colors.get(method, 'black'), marker='s', linewidth=2)
     ax2.set_xlabel('θ')
@@ -760,7 +533,7 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     # for nu in nu_vals:
     #     similarity_to_enhanced = []
     #     for method in ['DC', 'BC', 'HDC', 'SC']:
-    #         enhanced_set = set(all_seed_sets[nu]['Enhanced-NuGNN'])
+    #         enhanced_set = set(all_seed_sets[nu]['NDA-HGNN'])
     #         method_set = set(all_seed_sets[nu][method])
     #         similarity = len(enhanced_set & method_set) / len(enhanced_set | method_set)
     #         avg_similarities[method].append(similarity)
@@ -768,13 +541,13 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     # for method, similarities in avg_similarities.items():
     #     ax3.plot(nu_vals, similarities, label=method, color=colors.get(method, 'black'), marker='^', linewidth=2)
     # ax3.set_xlabel('ν')
-    # ax3.set_ylabel('Similarity to Enhanced-NuGNN')
+    # ax3.set_ylabel('Similarity to NDA-HGNN')
     # ax3.set_title('Senate')
     # ax3.legend()
     # ax3.grid(True)
 
     # # 4. 最大增长率
-    # for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
+    # for method in ['NDA-HGNN', 'DC', 'BC', 'HDC', 'SC']:
     #     growth_rates = [results[nu][method]['dynamics']['max_growth_rate'] for nu in nu_vals]
     #     ax4.plot(nu_vals, growth_rates, label=method, color=colors.get(method, 'black'), marker='d', linewidth=2)
     # ax4.set_xlabel('ν')
@@ -784,7 +557,7 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     # ax4.grid(True)
 
     plt.tight_layout()
-    plt.savefig('senate2--.png', dpi=300, bbox_inches='tight')
+    plt.savefig('senate2.png', dpi=300, bbox_inches='tight')
     plt.show()
 
 
@@ -802,7 +575,7 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"Error removing {cache_file}: {e}")
 
-    file_path = "/tmp/pycharm_project_973/hyperedges-senate-committees.txt"
+    file_path = "hyperedges-senate-committees.txt"
     incidence_matrix, edge_index, node_id_map = load_hypergraph(file_path)
     print(f"Original incidence matrix shape: {incidence_matrix.shape}")
     num_nodes = incidence_matrix.shape[0]
@@ -913,7 +686,7 @@ if __name__ == "__main__":
     # if not complexity_adequate:
     #     print("网络复杂度较低，建议使用标准模型")
     #     # 使用简化版模型
-    #     model = EnhancedNuAwareModel(
+    #     model = NonlinearDiffusionAwareModel(
     #         in_channels=features.shape[1],
     #         hidden_channels=128,
     #         out_channels=1,
@@ -922,7 +695,7 @@ if __name__ == "__main__":
     #     )
     # else:
     #     print("网络复杂度足够，使用增强模型")
-    #     model = EnhancedNuAwareModel(
+    #     model = NonlinearDiffusionAwareModel(
     #         in_channels=features.shape[1],
     #         hidden_channels=256,
     #         out_channels=1,
@@ -944,7 +717,7 @@ if __name__ == "__main__":
         print("智能调参失败，使用默认参数")
         best_params = {'hidden_channels': 128, 'num_layers': 2, 'num_heads': 4,
                        'dropout': 0.3, 'lr': 0.001, 'top_k_ratio': 0.05}
-    model = EnhancedNuAwareModel(
+    model = NonlinearDiffusionAwareModel(
         in_channels=data.x.shape[1],
         hidden_channels=best_params['hidden_channels'],
         out_channels=1,
@@ -1006,10 +779,10 @@ if __name__ == "__main__":
 
     # 分析训练前后的变化
     print("\n=== 训练前后关键节点变化分析 ===")
-    enhanced_before = set(initial_methods['Enhanced-NuGNN'])
-    enhanced_after = set(trained_methods['Enhanced-NuGNN'])
+    enhanced_before = set(initial_methods['NDA-HGNN'])
+    enhanced_after = set(trained_methods['NDA-HGNN'])
     changed_nodes = enhanced_before.symmetric_difference(enhanced_after)
-    print(f"训练前后Enhanced-NuGNN关键节点变化数量: {len(changed_nodes)}")
+    print(f"训练前后NDA-HGNN关键节点变化数量: {len(changed_nodes)}")
     print(f"新增节点: {enhanced_after - enhanced_before}")
     print(f"减少节点: {enhanced_before - enhanced_after}")
 
@@ -1020,7 +793,7 @@ if __name__ == "__main__":
     print("\n=== 详细性能分析 ===")
     for nu in nu_vals:
         print(f"\nν = {nu:.1f}:")
-        for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
+        for method in ['NDA-HGNN', 'DC', 'BC', 'HDC', 'SC']:
             data = results[nu][method]
             print(f"  {method}: {data['final_fraction']:.4f} "
                   f"(50%时间: {data['dynamics']['time_to_half']:.0f})")

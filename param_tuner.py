@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from baseline import compute_hdc, compute_bc, compute_sc
 from connectivity import hypergraph_natural_connectivity
-from new_aware_model import *
+from NDA_HGNN_model import *
 from torch.optim import Adam
 from sklearn.model_selection import train_test_split
 from nonlinear import HypergraphContagion
@@ -50,6 +50,7 @@ def compute_infection_loss(model, data, incidence_matrix, nu, lambda_val=0.1, to
 
 
 def compute_proxy_infection_loss(model, data, incidence_matrix, nu):
+    """感染率代理损失"""
     model.train()
 
     node_degrees = torch.tensor(compute_hdc(incidence_matrix), dtype=torch.float, device=data.x.device).view(-1, 1)
@@ -59,12 +60,45 @@ def compute_proxy_infection_loss(model, data, incidence_matrix, nu):
     rwhc = torch.tensor(RWHCCalculator(incidence_matrix).calculate_rwhc(), dtype=torch.float, device=main_scores.device)
     pagerank = torch.tensor(compute_pagerank(incidence_matrix), dtype=torch.float, device=main_scores.device)
 
-    if nu < 1.5:
-        proxy_target = 0.4 * hdc + 0.3 * rwhc + 0.3 * pagerank
+    if nu < 1.3:
+        # 低θ：传播主要依赖直接连接，侧重度中心性
+        base_weights = torch.tensor([0.5, 0.3, 0.2], device=main_scores.device)  # HDC, RWHC, PageRank
+        interaction_weight = 0.1
+    elif nu < 1.7:
+        # 中θ：平衡各种机制
+        base_weights = torch.tensor([0.4, 0.4, 0.2], device=main_scores.device)
+        interaction_weight = 0.15
     else:
-        proxy_target = 0.3 * hdc + 0.3 * rwhc + 0.4 * pagerank
+        # 高θ：集体感染效应强，侧重随机游走
+        base_weights = torch.tensor([0.3, 0.5, 0.2], device=main_scores.device)
+        interaction_weight = 0.2
 
-    proxy_target = (proxy_target - proxy_target.min()) / (proxy_target.max() - proxy_target.min() + 1e-10)
+    hdc_rwhc_interaction = hdc * rwhc  # 度中心性与随机游走的协同 特征交互
+
+    proxy_target = (
+            base_weights[0] * hdc +
+            base_weights[1] * rwhc +
+            base_weights[2] * pagerank +
+            interaction_weight * hdc_rwhc_interaction
+    )
+
+    node_degrees_np = np.sum(incidence_matrix, axis=1).A1
+    adj = incidence_matrix.dot(incidence_matrix.T) - sparse.diags(node_degrees_np)
+
+    adj_dense = torch.tensor(adj.toarray(), dtype=torch.float, device=main_scores.device)
+
+    # 计算邻居的平均影响力
+    neighbor_influence = torch.matmul(adj_dense, proxy_target.unsqueeze(1)).squeeze()
+
+    # 邻居度归一化
+    neighbor_degrees = torch.sum(adj_dense, dim=1)
+    neighbor_influence = neighbor_influence / (neighbor_degrees + 1e-10)
+
+    # 自身特征 + 邻居影响
+    proxy_target = 0.7 * proxy_target + 0.3 * neighbor_influence
+
+    proxy_target = (proxy_target - proxy_target.min()) / (proxy_target.max() - proxy_target.min() + 1e-10)  # 防止梯度爆炸
+
     loss = F.mse_loss(main_scores.squeeze(), proxy_target)
     return loss
 
@@ -197,7 +231,7 @@ class HyperparameterTuner:
             params['hidden_channels'] = trial.suggest_categorical('hidden_channels_large', [256, 512])
 
         try:
-            model = EnhancedNuAwareModel(
+            model = NonlinearDiffusionAwareModel(
                 in_channels=self.data.x.shape[1],
                 hidden_channels=params['hidden_channels'],
                 out_channels=1,

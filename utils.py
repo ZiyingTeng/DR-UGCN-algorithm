@@ -535,7 +535,7 @@ def analyze_critical_nodes_comparison(incidence_matrix, baseline_scores, enhance
 
     # 打印对比
     methods = {
-        'Enhanced-NuGNN': enhanced_top,
+        'NDA-HGNN': enhanced_top,
         'HDC': hdc_top,
         'DC': dc_top,
         'BC': bc_top,
@@ -594,11 +594,11 @@ def analyze_critical_nodes_comparison(incidence_matrix, baseline_scores, enhance
             covered_edges.update(edges_of_node)
         covered_edges_dict[method] = covered_edges
 
-    # 计算Enhanced-NuGNN与其他方法的超边重叠度
-    enhanced_edges = covered_edges_dict['Enhanced-NuGNN']
-    print("Enhanced-NuGNN与其他方法的超边重叠情况:")
+    # 计算NDA-HGNN与其他方法的超边重叠度
+    enhanced_edges = covered_edges_dict['NDA-HGNN']
+    print("NDA-HGNN与其他方法的超边重叠情况:")
     for method, edges in covered_edges_dict.items():
-        if method != 'Enhanced-NuGNN':
+        if method != 'NDA-HGNN':
             overlap = len(enhanced_edges & edges)
             jaccard = overlap / len(enhanced_edges | edges) if len(enhanced_edges | edges) > 0 else 0
             print(f"  vs {method}: 重叠超边数={overlap}, Jaccard相似度={jaccard:.3f}")
@@ -626,13 +626,13 @@ def analyze_critical_nodes_comparison(incidence_matrix, baseline_scores, enhance
             row += f"{overlap_matrix[i, j]:>15}"
         print(row)
 
-    # 分析Enhanced-NuGNN的独特点
+    # 分析NDA-HGNN的独特点
     enhanced_set = set(enhanced_top)
-    other_sets = [set(methods[name]) for name in method_names if name != 'Enhanced-NuGNN']
+    other_sets = [set(methods[name]) for name in method_names if name != 'NDA-HGNN']
     unique_to_enhanced = enhanced_set - set().union(*other_sets)
 
     if unique_to_enhanced:
-        print(f"\nEnhanced-NuGNN独有的关键节点: {sorted(unique_to_enhanced)}")
+        print(f"\nNDA-HGNN独有的关键节点: {sorted(unique_to_enhanced)}")
         # 分析这些独有节点的特性
         node_degrees = compute_hdc(incidence_matrix)
         unique_degrees = node_degrees[list(unique_to_enhanced)]
@@ -649,6 +649,6 @@ def analyze_critical_nodes_comparison(incidence_matrix, baseline_scores, enhance
                 edge_size_info.append(f"E{edge}({edge_size}节点)")
             print(f"  节点{node}: 覆盖超边 {', '.join(edge_size_info)}")
     else:
-        print(f"\nEnhanced-NuGNN没有独有关键节点")
+        print(f"\nNDA-HGNN没有独有关键节点")
 
     return methods

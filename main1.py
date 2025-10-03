@@ -7,7 +7,7 @@ from scipy.sparse import csr_matrix
 from sklearn.model_selection import train_test_split
 from torch_geometric.data import Data
 from UniGGCN import UniGCNRegression
-from new_aware_model import NuAwareUniGCN, NuAwareUniGCNWithFiLM, EnhancedNuAwareModel
+from NDA_HGNN_model import NonlinearDiffusionAwareModel
 from nonlinear import HypergraphContagion
 from rwhc import RWHCCalculator
 from rwiec import RWIECalculator
@@ -161,11 +161,11 @@ def compare_connectivity_across_algorithms(incidence_matrix, baseline_scores, en
     results = {}
 
     # 评估增强算法
-    print(f"Evaluating Enhanced-NuGNN connectivity...")
+    print(f"Evaluating NDA-HGNN connectivity...")
     enhanced_connectivity = evaluate_connectivity_after_removal(
-        incidence_matrix, enhanced_scores, "Enhanced-NuGNN", removal_ratios
+        incidence_matrix, enhanced_scores, "NDA-HGNN", removal_ratios
     )
-    results['Enhanced-NuGNN'] = enhanced_connectivity
+    results['NDA-HGNN'] = enhanced_connectivity
 
     # 评估基线算法
     for method_name, scores in baseline_scores.items():
@@ -178,7 +178,7 @@ def compare_connectivity_across_algorithms(incidence_matrix, baseline_scores, en
     # 绘制结果
     plt.figure(figsize=(10, 6))
     colors = {
-        'Enhanced-NuGNN': 'blue',
+        'NDA-HGNN': 'blue',
         'DC': 'red',
         'BC': 'green',
         'HDC': 'orange',
@@ -642,19 +642,19 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
                                         dtype=torch.float, device=data.x.device).view(-1, 1)
             main_scores, linear_scores = model(data, nu, node_degrees)
             enhanced_nodes = np.argsort(main_scores.cpu().numpy().flatten())[-top_k:]
-            nu_seed_sets['Enhanced-NuGNN'] = enhanced_nodes
+            nu_seed_sets['NDA-HGNN'] = enhanced_nodes
 
-            # === 新增：打印Enhanced-NuGNN的关键节点和分数 ===
+            # === 新增：打印NDA-HGNN的关键节点和分数 ===
             enhanced_scores = main_scores.cpu().numpy().flatten()
             top_enhanced_indices = np.argsort(enhanced_scores)[-top_k:][::-1]  # 从高到低
-            print(f"Enhanced-NuGNN Top{top_k}节点索引: {top_enhanced_indices}")
-            print(f"Enhanced-NuGNN Top{top_k}节点分数: {enhanced_scores[top_enhanced_indices]}")
+            print(f"NDA-HGNN Top{top_k}节点索引: {top_enhanced_indices}")
+            print(f"NDA-HGNN Top{top_k}节点分数: {enhanced_scores[top_enhanced_indices]}")
 
-            # === 修复：评估Enhanced-NuGNN的性能并添加到results中 ===
+            # === 修复：评估NDA-HGNN的性能并添加到results中 ===
             enhanced_dynamics = evaluate_infection_dynamics(
                 incidence_matrix, enhanced_nodes, lambda_val, nu, num_runs=num_runs
             )
-            results[nu]['Enhanced-NuGNN'] = {
+            results[nu]['NDA-HGNN'] = {
                 'final_fraction': enhanced_dynamics['final_fraction'],
                 'dynamics': enhanced_dynamics
             }
@@ -701,26 +701,26 @@ def evaluate_enhanced_model(model, incidence_matrix, data, nu_vals, lambda_val, 
 
         # === 新增：打印方法间重叠度对比 ===
         print(f"\n--- 方法间重叠度对比 (ν={nu:.1f}) ---")
-        enhanced_set = set(nu_seed_sets['Enhanced-NuGNN'])
+        enhanced_set = set(nu_seed_sets['NDA-HGNN'])
         for method, nodes in nu_seed_sets.items():
-            if method != 'Enhanced-NuGNN':
+            if method != 'NDA-HGNN':
                 method_set = set(nodes)
                 overlap = len(enhanced_set & method_set)
                 jaccard = overlap / len(enhanced_set | method_set) if len(enhanced_set | method_set) > 0 else 0
-                print(f"Enhanced-NuGNN vs {method}: 重叠{overlap}个节点, Jaccard相似度={jaccard:.3f}")
+                print(f"NDA-HGNN vs {method}: 重叠{overlap}个节点, Jaccard相似度={jaccard:.3f}")
 
-        # === 修复：确保Enhanced-NuGNN的结果存在再打印 ===
-        if 'Enhanced-NuGNN' in results[nu]:
-            print(f"ν={nu:.1f}: Enhanced-NuGNN: {results[nu]['Enhanced-NuGNN']['final_fraction']:.4f}")
+        # === 修复：确保NDA-HGNN的结果存在再打印 ===
+        if 'NDA-HGNN' in results[nu]:
+            print(f"ν={nu:.1f}: NDA-HGNN: {results[nu]['NDA-HGNN']['final_fraction']:.4f}")
         else:
-            print(f"ν={nu:.1f}: Enhanced-NuGNN结果缺失")
+            print(f"ν={nu:.1f}: NDA-HGNN结果缺失")
 
     return results, all_seed_sets
 
 
 def plot_results(nu_vals, results):
     colors = {
-        'Enhanced-NuGNN': 'blue',
+        'NDA-HGNN': 'blue',
         'DC': 'red',
         'BC': 'green',
         'HDC': 'orange',
@@ -749,8 +749,8 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
 
     # 1. 最终感染比例
-    colors = {'Enhanced-NuGNN': 'blue', 'DC': 'red', 'BC': 'green', 'HDC': 'orange', 'SC': 'purple'}
-    for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
+    colors = {'NDA-HGNN': 'blue', 'DC': 'red', 'BC': 'green', 'HDC': 'orange', 'SC': 'purple'}
+    for method in ['NDA-HGNN', 'DC', 'BC', 'HDC', 'SC']:
         fractions = [results[nu][method]['final_fraction'] for nu in nu_vals]
         ax1.plot(nu_vals, fractions, label=method, color=colors.get(method, 'black'), marker='o', linewidth=2)
     ax1.set_xlabel('θ')
@@ -760,7 +760,7 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     ax1.grid(True)
 
     # 2. 达到50%感染的时间
-    for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
+    for method in ['NDA-HGNN', 'DC', 'BC', 'HDC', 'SC']:
         times = [results[nu][method]['dynamics']['time_to_half'] for nu in nu_vals]
         ax2.plot(nu_vals, times, label=method, color=colors.get(method, 'black'), marker='s', linewidth=2)
     ax2.set_xlabel('θ')
@@ -774,7 +774,7 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     # for nu in nu_vals:
     #     similarity_to_enhanced = []
     #     for method in ['DC', 'BC', 'HDC', 'SC']:
-    #         enhanced_set = set(all_seed_sets[nu]['Enhanced-NuGNN'])
+    #         enhanced_set = set(all_seed_sets[nu]['NDA-HGNN'])
     #         method_set = set(all_seed_sets[nu][method])
     #         similarity = len(enhanced_set & method_set) / len(enhanced_set | method_set)
     #         avg_similarities[method].append(similarity)
@@ -782,13 +782,13 @@ def plot_enhanced_results(nu_vals, results, all_seed_sets):
     # for method, similarities in avg_similarities.items():
     #     ax3.plot(nu_vals, similarities, label=method, color=colors.get(method, 'black'), marker='^', linewidth=2)
     # ax3.set_xlabel('ν')
-    # ax3.set_ylabel('Similarity to Enhanced-NuGNN')
+    # ax3.set_ylabel('Similarity to NDA-HGNN')
     # ax3.set_title('Senate')
     # ax3.legend()
     # ax3.grid(True)
 
     # # 4. 最大增长率
-    # for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
+    # for method in ['NDA-HGNN', 'DC', 'BC', 'HDC', 'SC']:
     #     growth_rates = [results[nu][method]['dynamics']['max_growth_rate'] for nu in nu_vals]
     #     ax4.plot(nu_vals, growth_rates, label=method, color=colors.get(method, 'black'), marker='d', linewidth=2)
     # ax4.set_xlabel('ν')
@@ -927,7 +927,7 @@ if __name__ == "__main__":
     # if not complexity_adequate:
     #     print("网络复杂度较低，建议使用标准模型")
     #     # 使用简化版模型
-    #     model = EnhancedNuAwareModel(
+    #     model = NonlinearDiffusionAwareModel(
     #         in_channels=features.shape[1],
     #         hidden_channels=128,
     #         out_channels=1,
@@ -936,7 +936,7 @@ if __name__ == "__main__":
     #     )
     # else:
     #     print("网络复杂度足够，使用增强模型")
-    #     model = EnhancedNuAwareModel(
+    #     model = NonlinearDiffusionAwareModel(
     #         in_channels=features.shape[1],
     #         hidden_channels=256,
     #         out_channels=1,
@@ -958,7 +958,7 @@ if __name__ == "__main__":
         print("智能调参失败，使用默认参数")
         best_params = {'hidden_channels': 128, 'num_layers': 2, 'num_heads': 4,
                        'dropout': 0.3, 'lr': 0.001, 'top_k_ratio': 0.05}
-    model = EnhancedNuAwareModel(
+    model = NonlinearDiffusionAwareModel(
         in_channels=data.x.shape[1],
         hidden_channels=best_params['hidden_channels'],
         out_channels=1,
@@ -1009,10 +1009,10 @@ if __name__ == "__main__":
 
     # 分析训练前后的变化
     print("\n=== 训练前后关键节点变化分析 ===")
-    enhanced_before = set(initial_methods['Enhanced-NuGNN'])
-    enhanced_after = set(trained_methods['Enhanced-NuGNN'])
+    enhanced_before = set(initial_methods['NDA-HGNN'])
+    enhanced_after = set(trained_methods['NDA-HGNN'])
     changed_nodes = enhanced_before.symmetric_difference(enhanced_after)
-    print(f"训练前后Enhanced-NuGNN关键节点变化数量: {len(changed_nodes)}")
+    print(f"训练前后NDA-HGNN关键节点变化数量: {len(changed_nodes)}")
     print(f"新增节点: {enhanced_after - enhanced_before}")
     print(f"减少节点: {enhanced_before - enhanced_after}")
 
@@ -1023,7 +1023,7 @@ if __name__ == "__main__":
     print("\n=== 详细性能分析 ===")
     for nu in nu_vals:
         print(f"\nν = {nu:.1f}:")
-        for method in ['Enhanced-NuGNN', 'DC', 'BC', 'HDC', 'SC']:
+        for method in ['NDA-HGNN', 'DC', 'BC', 'HDC', 'SC']:
             data = results[nu][method]
             print(f"  {method}: {data['final_fraction']:.4f} "
                   f"(50%时间: {data['dynamics']['time_to_half']:.0f})")
